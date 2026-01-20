@@ -18,13 +18,7 @@ if not TELEGRAM_BOT_TOKEN or not GEMINI_API_KEY:
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
-SYSTEM_PROMPT = """
-You are Lina, a real estate expert in Netanya (Lina Real Estate).
-Language: Hebrew.
-Tone: Professional, short, and helpful.
-Goal: Help clients buy/rent properties or get their phone number.
-Important: Answer in Hebrew. Keep it short.
-"""
+SYSTEM_PROMPT = "את Lina, סוכנת נדל\"ן בנתניה. עני בעברית, קצר ומקצועי."
 
 chats_history = {}
 
@@ -36,17 +30,20 @@ def get_main_keyboard():
     return ReplyKeyboardMarkup([[button]], resize_keyboard=True, one_time_keyboard=False)
 
 # ==========================================
-# 🧠 חיבור לגוגל (התיקון: מעבר ל-v1)
+# 🧠 חיבור לגוגל ("מפתח מאסטר" - מנסה הכל)
 # ==========================================
 def send_to_google_direct(history_text, user_text):
-    # המודל שבחרת בקוד שלך
-    model_name = "gemini-1.5-flash"
+    """ מנסה 3 גרסאות שונות של גוגל עד להצלחה """
     
-    # --- התיקון הקריטי ---
-    # בתמונות שלך ראינו ש-v1beta נחסם (שגיאה 404).
-    # שיניתי כאן ל-v1 וזה יפתור את הבעיה.
-    url = f"https://generativelanguage.googleapis.com/v1/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
-    # ---------------------
+    # רשימת הכתובות האפשריות (מהחדש לישן)
+    endpoints = [
+        # אופציה 1: המודל הכי חדש (Flash) בגרסת בטא
+        f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}",
+        # אופציה 2: המודל היציב (Pro) בגרסה הרשמית
+        f"https://generativelanguage.googleapis.com/v1/models/gemini-pro:generateContent?key={GEMINI_API_KEY}",
+        # אופציה 3: המודל הישן (1.0 Pro) בגרסת בטא (גיבוי חירום)
+        f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.0-pro:generateContent?key={GEMINI_API_KEY}"
+    ]
     
     headers = {'Content-Type': 'application/json'}
     payload = {
@@ -55,21 +52,30 @@ def send_to_google_direct(history_text, user_text):
         }]
     }
 
-    try:
-        # Timeout של 30 שניות כדי למנוע את השגיאה של 504 (ניתוק)
-        response = requests.post(url, json=payload, headers=headers, timeout=30)
-        
-        if response.status_code == 200:
-            return response.json()['candidates'][0]['content']['parts'][0]['text']
-        else:
-            # אם יש שגיאה, נדפיס אותה שתדעי
-            return f"⚠️ שגיאה מגוגל ({response.status_code}):\n{response.text}"
+    last_error = ""
+
+    # לולאה שמנסה את הכתובות אחת אחרי השנייה
+    for url in endpoints:
+        try:
+            response = requests.post(url, json=payload, headers=headers, timeout=30)
             
-    except Exception as e:
-        return f"⚠️ שגיאת חיבור: {str(e)}"
+            if response.status_code == 200:
+                # הצלחה! מחזירים את התשובה ויוצאים
+                return response.json()['candidates'][0]['content']['parts'][0]['text']
+            else:
+                last_error = f"Error {response.status_code}: {response.text}"
+                print(f"⚠️ ניסיון נכשל בכתובת {url}: {response.status_code}")
+                continue # מנסה את הכתובת הבאה
+                
+        except Exception as e:
+            last_error = str(e)
+            continue
+
+    # אם כל 3 הכתובות נכשלו
+    return f"⚠️ שגיאה סופית בגוגל (כל המודלים נכשלו):\n{last_error}"
 
 # ==========================================
-# 📩 הנדלרים (הקוד המקורי שלך)
+# 📩 הנדלרים
 # ==========================================
 
 async def send_lead_alert(context, name, username, phone, source):
@@ -85,9 +91,7 @@ async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text: return
-    
-    # חוסם תגובות לערוץ (כדי למנוע לופים)
-    if update.effective_user.id == 777000: return
+    if update.effective_user.id == 777000: return # מונע לופים בערוץ
 
     user_text = update.message.text
     user_id = update.effective_user.id
@@ -104,11 +108,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     history = ""
     for msg in chats_history[user_id][-4:]: history += f"{msg['role']}: {msg['text']}\n"
 
-    # חיווי הקלדה בפרטי בלבד
     if update.effective_chat.type == 'private':
         await context.bot.send_chat_action(chat_id=update.effective_chat.id, action='typing')
     
-    # שליחה לגוגל
+    # שליחה לגוגל עם המנגנון החכם
     bot_answer = send_to_google_direct(history, user_text)
     
     chats_history[user_id].append({"role": "user", "text": user_text})
@@ -117,7 +120,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type == 'private':
         await context.bot.send_message(chat_id=update.effective_chat.id, text=bot_answer, reply_markup=get_main_keyboard())
     else:
-        # בקבוצה - מגיב בציטוט
         await context.bot.send_message(chat_id=update.effective_chat.id, text=bot_answer, reply_to_message_id=update.message.message_id)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -131,5 +133,5 @@ if __name__ == '__main__':
     app.add_handler(MessageHandler(filters.CONTACT, handle_contact))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
     
-    print("✅ הבוט רץ (הקוד שלך, כתובת v1 תקינה)")
+    print("✅ הבוט רץ (מצב מפתח מאסטר - מנסה את כל האפשרויות)")
     app.run_polling()
