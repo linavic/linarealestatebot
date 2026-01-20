@@ -20,49 +20,67 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 ADMIN_ID = 1687054059
 
-# לוגים - כדי לראות במסך השחור אם יש שגיאה
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 
 # ==========================================
-# 🧠 הגדרת גוגל (מודל Flash המהיר)
+# 🧠 הגדרת גוגל ("הצייד" - מנסה הכל)
 # ==========================================
-if not GEMINI_API_KEY:
-    print("❌ שגיאה: חסר מפתח גוגל")
-else:
+if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
-    # משתמשים ב-Flash שהוא המהיר והיציב ביותר כרגע
-    model = genai.GenerativeModel("gemini-1.5-flash")
+else:
+    print("❌ שגיאה: חסר מפתח גוגל")
 
 SYSTEM_PROMPT = "את Lina, סוכנת נדל\"ן בנתניה. עני בעברית, קצר (עד 2 משפטים) ומקצועי. המטרה: לקבל טלפון."
+
+def ask_gemini_smart(text):
+    """ מנסה מספר מודלים עד שאחד מצליח """
+    
+    # רשימת המודלים מהחדש לישן
+    # הבוט ינסה אותם אחד אחד
+    models_to_try = [
+        "gemini-1.5-flash", # הכי מהיר
+        "gemini-pro",       # הכי יציב (הישן)
+        "gemini-1.5-pro"    # הכי חכם (וכבד)
+    ]
+    
+    last_error = ""
+    
+    for model_name in models_to_try:
+        try:
+            model = genai.GenerativeModel(model_name)
+            # Timeout של 30 שניות כדי למנוע שגיאת 504
+            response = model.generate_content(
+                f"{SYSTEM_PROMPT}\nUser: {text}", 
+                request_options={'timeout': 30}
+            )
+            
+            if response.text:
+                return response.text.strip()
+                
+        except Exception as e:
+            # אם נכשל, שומר את השגיאה ועובר למודל הבא ברשימה
+            last_error = str(e)
+            print(f"⚠️ מודל {model_name} נכשל, עובר לבא...")
+            continue
+            
+    # אם כל המודלים נכשלו
+    print(f"❌ שגיאה סופית: {last_error}")
+    return "יש לי תקלה טכנית רגעית, אנא נסה שוב מאוחר יותר."
 
 # ==========================================
 # 🎮 כפתור שליחת טלפון
 # ==========================================
 def get_main_keyboard():
     return ReplyKeyboardMarkup(
-        [[KeyboardButton("📞 שלח טלפון ללינה (לחץ כאן)", request_contact=True)]], 
+        [[KeyboardButton("📞 שלח מספר טלפון ללינה (לחץ כאן)", request_contact=True)]], 
         resize_keyboard=True
     )
-
-# ==========================================
-# 🧠 שליחה לגוגל
-# ==========================================
-def ask_gemini(text):
-    try:
-        # פניה דרך הספריה הרשמית
-        response = model.generate_content(f"{SYSTEM_PROMPT}\nUser: {text}")
-        return response.text.strip()
-    except Exception as e:
-        logging.error(f"Gemini Error: {e}")
-        return "אני בודקת את הפרטים, רגע אחד."
 
 # ==========================================
 # 📩 טיפול בהודעות
 # ==========================================
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text: return
-    
-    # התעלמות מערוצים
     if update.effective_user.id == 777000: return 
 
     text = update.message.text
@@ -84,18 +102,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if chat_type == 'private':
         await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
 
-    # שליחה לגוגל ברקע
+    # שליחה לגוגל
     loop = asyncio.get_running_loop()
     try:
-        answer = await loop.run_in_executor(None, ask_gemini, text)
+        answer = await loop.run_in_executor(None, ask_gemini_smart, text)
         
         if chat_type == 'private':
+            # שולח הודעה + מוודא שהכפתור מופיע
             await update.message.reply_text(answer, reply_markup=get_main_keyboard())
         else:
             await update.message.reply_text(answer, quote=True)
             
     except Exception as e:
-        logging.error(f"Error: {e}")
+        print(f"Error: {e}")
 
 # ==========================================
 # 📞 טיפול בליד (טלפון)
@@ -139,7 +158,5 @@ if __name__ == "__main__":
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
         print("🧹 מנקה הודעות ישנות...")
-        # הפקודה הזו מנקה את כל התקיעות!
         app.run_polling(drop_pending_updates=True)
-        print("✅ הבוט אופס ומוכן לעבודה!")
-
+        print("✅ הבוט מוכן! (מצב מרובה מודלים)")
