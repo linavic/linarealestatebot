@@ -9,7 +9,7 @@ from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, Messa
 from keep_alive import keep_alive
 
 # ==========================================
-# ⚙️ הגדרות (מושך מה-Secrets שלך)
+# ⚙️ הגדרות
 # ==========================================
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
@@ -30,23 +30,30 @@ Important: If the user provides a phone number, thank them and say you will call
 chats_history = {}
 
 # ==========================================
-# 🧠 חיבור לגוגל - הגרסה היציבה (v1 + gemini-pro)
+# 🧠 חיבור לגוגל (הגרסה היציבה - 1.0 Pro)
 # ==========================================
 def send_to_google_stable(history_text, user_text):
-    """ חיבור למודל היציב ביותר ללא ניסויים """
+    """ שימוש במודל 1.0-pro שעובד תמיד """
     
-    # שימוש ב-v1 הרגיל ובמודל gemini-pro (הכי אמין שיש)
-    url = f"https://generativelanguage.googleapis.com/v1/models/gemini-pro:generateContent?key={GEMINI_API_KEY}"
+    # שימוש ב-gemini-1.0-pro שהוא הגרסה היציבה ביותר כרגע לבוטים
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.0-pro:generateContent?key={GEMINI_API_KEY}"
     
     headers = {'Content-Type': 'application/json'}
     payload = {
         "contents": [{
             "parts": [{"text": f"{SYSTEM_PROMPT}\n\nHistory:\n{history_text}\nUser: {user_text}\nAgent:"}]
-        }]
+        }],
+        # הגדרות בטיחות כדי למנוע חסימות סתמיות
+        "safetySettings": [
+            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"}
+        ]
     }
 
     try:
-        response = requests.post(url, json=payload, headers=headers, timeout=20)
+        response = requests.post(url, json=payload, headers=headers, timeout=15)
         
         if response.status_code == 200:
             try:
@@ -54,11 +61,27 @@ def send_to_google_stable(history_text, user_text):
             except KeyError:
                 return "אני בודקת את זה, אשיב לך מיד."
         else:
-            # אם יש שגיאה, נחזיר אותה כדי שנדע למה (ולא הודעה גנרית)
-            return f"⚠️ שגיאת גוגל ({response.status_code}):\n{response.text[:200]}"
+            # במקרה נדיר של כישלון - ננסה את המודל הישן יותר (גיבוי)
+            print(f"⚠️ מודל 1.0 נכשל, מנסה gemini-pro רגיל... (שגיאה: {response.status_code})")
+            return send_to_google_fallback(history_text, user_text)
 
     except Exception as e:
         return f"⚠️ תקלת תקשורת: {str(e)}"
+
+def send_to_google_fallback(history_text, user_text):
+    """ גיבוי למקרה חירום - מודל gemini-pro הישן """
+    url = f"https://generativelanguage.googleapis.com/v1/models/gemini-pro:generateContent?key={GEMINI_API_KEY}"
+    headers = {'Content-Type': 'application/json'}
+    payload = {
+        "contents": [{"parts": [{"text": f"{SYSTEM_PROMPT}\n\nUser: {user_text}\nAgent:"}]}]
+    }
+    try:
+        response = requests.post(url, json=payload, headers=headers, timeout=15)
+        if response.status_code == 200:
+            return response.json()['candidates'][0]['content']['parts'][0]['text']
+    except:
+        pass
+    return "יש לי תקלה טכנית רגעית. אנא השאר טלפון ואחזור אליך."
 
 # ==========================================
 # 📩 טיפול בהודעות
@@ -66,27 +89,22 @@ def send_to_google_stable(history_text, user_text):
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text: return
-    # התעלמות מעדכוני מערכת של הערוץ
     if update.effective_user.id == 777000: return
 
     user_text = update.message.text
     user_id = update.effective_user.id
     chat_type = update.effective_chat.type
     
-    print(f"📩 הודעה: {user_text}")
-
-    # 1. זיהוי מספר טלפון
+    # 1. זיהוי טלפון
     phone_pattern = re.compile(r'05\d{1}[- ]?\d{3}[- ]?\d{4}')
     match = phone_pattern.search(user_text)
     if match:
         phone = match.group(0)
         try:
-            # שליחת הליד למנהל
             await context.bot.send_message(ADMIN_ID, f"🔔 **ליד חדש!**\n📱 `{phone}`\n💬 {user_text}", parse_mode='Markdown')
         except: pass
         
         await update.message.reply_text("תודה! רשמתי את המספר, לינה תחזור אליך.")
-        # ממשיכים ל-AI
 
     # 2. חיווי הקלדה
     if chat_type == 'private':
@@ -113,7 +131,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(bot_answer, quote=True)
     except Exception as e:
         print(f"Error sending msg: {e}")
-        # במקרה חירום מנסים לשלוח שוב ללא עיצוב
         await update.message.reply_text(bot_answer)
 
 def get_main_keyboard():
@@ -145,7 +162,4 @@ if __name__ == '__main__':
         app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
         app.add_handler(CommandHandler('start', start))
         app.add_handler(MessageHandler(filters.CONTACT, handle_contact))
-        app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
-        
-        print("✅ הבוט רץ! (גרסת v1 היציבה)")
-        app.run_polling()
+        app.add_handler(
