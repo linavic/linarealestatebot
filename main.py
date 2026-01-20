@@ -16,33 +16,33 @@ GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
 ADMIN_ID = 1687054059
 
-# לוגים (כדי לראות מה קורה מאחורי הקלעים)
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # ==========================================
 # 📝 הגדרות בוט
 # ==========================================
 SYSTEM_PROMPT = """
 You are Lina, a real estate expert in Netanya (Lina Real Estate).
-Language: Hebrew (unless user speaks English/Russian).
-Tone: Professional, short, inviting.
-Goal: Provide info about properties or get the user's phone number.
-Important: If the user shares a phone number, thank them and say Lina will call.
+Language: Hebrew.
+Tone: Professional, short, and helpful.
+Goal: Help clients buy/rent properties or get their phone number.
+Important: If the user provides a phone number, thank them and say you will call.
 """
 chats_history = {}
 
 # ==========================================
-# 🧠 חיבור לגוגל (עם המודל היציב ביותר)
+# 🧠 חיבור לגוגל (עם תיקון המודל!)
 # ==========================================
 def send_to_google_blocking(history_text, user_text):
-    """ פונקציה שרצה ברקע ושולחת לגוגל """
+    """ רץ ברקע ומנסה את המודלים שעובדים בטוח """
     
-    # שינוי קריטי: משתמשים במודל הישן והיציב שעובד בטוח
-    # אם זה נכשל, ננסה גרסאות אחרות
+    # שינוי קריטי: הסרנו את Flash שגרם לשגיאה 404
+    # שמנו את Pro ראשון כי הוא הכי אמין
     models_to_try = [
-        "gemini-pro",             # המודל הכי יציב שיש
-        "gemini-1.0-pro",         # גרסה חלופית
-        "gemini-1.5-flash-001"    # גרסה ספציפית של פלאש
+        "gemini-1.5-pro",         # הכי חזק ויציב
+        "gemini-2.0-flash-exp",   # הכי חדש (אם הפרו נכשל)
+        "gemini-1.0-pro"          # הכי ותיק (גיבוי אחרון)
     ]
     
     headers = {'Content-Type': 'application/json'}
@@ -55,28 +55,27 @@ def send_to_google_blocking(history_text, user_text):
     last_error = ""
 
     for model in models_to_try:
-        # שימוש ב-v1beta שהוא הסטנדרט כרגע
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_API_KEY}"
-        
         try:
+            # timeout קצר יחסית כדי לא לתקוע את הבוט
             response = requests.post(url, json=payload, headers=headers, timeout=12)
             
             if response.status_code == 200:
                 try:
-                    return response.json()['candidates'][0]['content']['parts'][0]['text']
+                    text = response.json()['candidates'][0]['content']['parts'][0]['text']
+                    return text # הצלחה!
                 except KeyError:
-                    continue # תשובה ריקה
+                    continue 
             else:
-                # מדלגים למודל הבא אם יש שגיאה
                 print(f"⚠️ מודל {model} נכשל ({response.status_code}), מנסה את הבא...")
-                last_error = response.text
+                last_error = f"Error {response.status_code} on {model}"
                 continue
 
         except Exception as e:
             last_error = str(e)
             continue
 
-    # אם הכל נכשל - הודעת שגיאה כללית למנהל, ותשובה מנומסת ללקוח
+    # אם הכל נכשל
     print(f"❌ שגיאה סופית: {last_error}")
     return "קיבלתי את ההודעה. אני בודקת את הפרטים ואחזור אליך בהקדם."
 
@@ -106,7 +105,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except: pass
             
             await update.message.reply_text("תודה! רשמתי את המספר, לינה תחזור אליך.")
-            # ממשיכים ל-AI
+            # ממשיכים ל-AI למקרה שיש שאלה
 
         # 2. חיווי הקלדה
         if chat_type == 'private':
@@ -133,7 +132,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     except Exception as e:
         print(f"Error: {e}")
-        # במקרה חירום לא שולחים כלום ללקוח כדי לא להציף בשגיאות
 
 def get_main_keyboard():
     btn = KeyboardButton("📞 שלח מספר טלפון", request_contact=True)
@@ -167,5 +165,5 @@ if __name__ == '__main__':
         app.add_handler(MessageHandler(filters.CONTACT, handle_contact))
         app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
         
-        print("✅ הבוט רץ! (מודל gemini-pro)")
+        print("✅ הבוט רץ! (מודל gemini-1.5-pro מופעל)")
         app.run_polling()
