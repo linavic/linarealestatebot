@@ -16,10 +16,9 @@ GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
 ADMIN_ID = 1687054059
 
-# בדיקה שהמפתחות קיימים (מונע קריסה שקטה)
+# בדיקה שהמפתחות קיימים
 if not GEMINI_API_KEY or not TELEGRAM_BOT_TOKEN:
-    print("❌ שגיאה קריטית: המפתחות לא נמצאו ב-Secrets/Environment Variables!")
-    # לא עוצרים את הקוד כדי שתראי את השגיאה, אבל הבוט לא יעבוד בלי זה
+    print("❌ שגיאה קריטית: המפתחות לא נמצאו ב-Secrets!")
 
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -37,13 +36,18 @@ Important: If the user provides a phone number, thank them and say you will call
 chats_history = {}
 
 # ==========================================
-# 🧠 חיבור לגוגל (רץ ברקע)
+# 🧠 חיבור לגוגל (עם מנגנון גיבוי נגד שגיאת 404)
 # ==========================================
 def send_to_google_blocking(history_text, user_text):
-    """ הפונקציה הזו רצה ברקע כדי לא לתקוע את הבוט """
+    """ רץ ברקע ומנסה מספר מודלים עד שאחד מצליח """
     
-    # רשימת מודלים לגיבוי
-    models = ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-1.0-pro"]
+    # רשימת מודלים מורחבת - כולל ישנים ויציבים
+    models_to_try = [
+        "gemini-1.5-flash",       # הכי חדש (נכשל אצלך קודם)
+        "gemini-1.5-pro",         # חזק יותר
+        "gemini-1.0-pro",         # גרסה יציבה
+        "gemini-pro"              # הגרסה הכי ותיקה ויציבה (גיבוי אחרון)
+    ]
     
     headers = {'Content-Type': 'application/json'}
     payload = {
@@ -54,28 +58,33 @@ def send_to_google_blocking(history_text, user_text):
 
     last_error = ""
 
-    for model in models:
+    for model in models_to_try:
+        # שימוש בכתובת v1beta שתומכת ברוב המודלים
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_API_KEY}"
         try:
-            # timeout=10 מונע מהבוט לחכות לנצח
+            # timeout קצר יחסית כדי לא לתקוע את הבוט אם מודל לא עונה
             response = requests.post(url, json=payload, headers=headers, timeout=10)
             
             if response.status_code == 200:
                 try:
-                    return response.json()['candidates'][0]['content']['parts'][0]['text']
+                    text = response.json()['candidates'][0]['content']['parts'][0]['text']
+                    return text # הצלחה! מחזירים את התשובה
                 except KeyError:
-                    continue 
+                    continue # תשובה ריקה, נסה הבא
+            
+            # אם קיבלנו שגיאה 404 (מודל לא נמצא) או אחרת
             else:
-                print(f"⚠️ מודל {model} נכשל, עובר למודל הבא...")
-                last_error = response.text[:100]
+                print(f"⚠️ מודל {model} נכשל ({response.status_code}), עובר למודל הבא...")
+                last_error = f"Error {response.status_code}"
                 continue
 
         except Exception as e:
             last_error = str(e)
             continue
 
-    print(f"❌ שגיאה סופית בגוגל: {last_error}")
-    return "סליחה, יש לי תקלה רגעית בתקשורת. אנא נסה שוב בעוד דקה."
+    # אם הגענו לפה, כל המודלים נכשלו.
+    print(f"❌ כל המודלים נכשלו. שגיאה אחרונה: {last_error}")
+    return "קיבלתי את ההודעה. אני כרגע בודקת את הפרטים, אחזור אליך בהקדם."
 
 # ==========================================
 # 📩 טיפול בהודעות
@@ -85,7 +94,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         # 1. סינון הודעות
         if not update.message or not update.message.text: return
-        # מתעלם מהודעות של הערוץ עצמו
+        # התעלמות מהודעות של הערוץ עצמו (כדי שלא יענה לעצמו בלופ)
         if update.effective_user.id == 777000: return
 
         user_text = update.message.text
@@ -94,7 +103,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         print(f"📩 הודעה חדשה ({chat_type}): {user_text}")
 
-        # 2. זיהוי מספר טלפון
+        # 2. זיהוי מספר טלפון (עובד מעולה לפי הצילום מסך)
         phone_pattern = re.compile(r'05\d{1}[- ]?\d{3}[- ]?\d{4}')
         match = phone_pattern.search(user_text)
         if match:
@@ -105,9 +114,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pass 
             
             await update.message.reply_text("תודה! רשמתי את המספר, לינה תחזור אליך.")
-            # ממשיכים ל-AI
+            # ממשיכים ל-AI למקרה שיש שאלה נוספת
 
-        # 3. חיווי הקלדה
+        # 3. חיווי הקלדה (רק בפרטי)
         if chat_type == 'private':
             await context.bot.send_chat_action(chat_id=update.effective_chat.id, action='typing')
 
@@ -118,11 +127,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             history += f"{msg['role']}: {msg['text']}\n"
 
         # 5. שליחה לגוגל בצורה אסינכרונית (מונע תקיעות!)
-        # זה התיקון הקריטי: אנחנו מריצים את הבקשה בנפרד מהבוט
         loop = asyncio.get_running_loop()
         bot_answer = await loop.run_in_executor(None, send_to_google_blocking, history, user_text)
 
-        # 6. שליחת התשובה
+        # 6. שמירה ושליחה
         chats_history[user_id].append({"role": "user", "text": user_text})
         chats_history[user_id].append({"role": "model", "text": bot_answer})
 
@@ -130,7 +138,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if chat_type == 'private':
                  await update.message.reply_text(bot_answer, reply_markup=get_main_keyboard())
             else:
-                 # בקבוצה - מגיב בציטוט
+                 # בקבוצה - מגיב בציטוט כדי שיבינו למי עונים
                  await update.message.reply_text(bot_answer, quote=True)
         except Exception as e:
             print(f"❌ שגיאה בשליחה לטלגרם: {e}")
@@ -158,7 +166,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 if __name__ == '__main__':
     keep_alive()
     
-    # מנקה וובהוקים ישנים
+    # מנקה וובהוקים ישנים למניעת התנגשויות
     if TELEGRAM_BOT_TOKEN:
         try:
             requests.get(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/deleteWebhook?drop_pending_updates=True")
@@ -173,5 +181,5 @@ if __name__ == '__main__':
         app.add_handler(MessageHandler(filters.CONTACT, handle_contact))
         app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
         
-        print("✅ הבוט רץ! (מושך מפתחות מ-Secrets)")
+        print("✅ הבוט רץ! (מנגנון Fallback למודלים מופעל)")
         app.run_polling()
