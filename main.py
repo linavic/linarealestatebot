@@ -2,9 +2,10 @@ import os
 import requests
 import logging
 import re
+import json
 from telegram import Update, KeyboardButton, ReplyKeyboardMarkup
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
-from keep_alive import keep_alive  # דורש את flask שהחזרנו
+from keep_alive import keep_alive 
 
 # ==========================================
 # ⚙️ הגדרות
@@ -13,39 +14,59 @@ GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
 ADMIN_ID = 1687054059
 
-if not TELEGRAM_BOT_TOKEN or not GEMINI_API_KEY:
-    print("❌ שגיאה: חסרים מפתחות ב-Secrets!")
-
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
 SYSTEM_PROMPT = "את Lina, סוכנת נדל\"ן בנתניה. עני בעברית, קצר ומקצועי."
 chats_history = {}
+current_model_url = "" # נשמור כאן את המודל שעובד
 
 # ==========================================
-# 🧠 המקלדת
+# 🧠 גילוי מודלים אוטומטי (Auto-Discovery)
 # ==========================================
-def get_main_keyboard():
-    button = KeyboardButton("📞 שלח את המספר שלי ללינה", request_contact=True)
-    return ReplyKeyboardMarkup([[button]], resize_keyboard=True, one_time_keyboard=False)
+def find_working_model():
+    """ שואל את גוגל איזה מודלים פתוחים ובוחר אחד """
+    global current_model_url
+    
+    print("🔍 בודק איזה מודלים פתוחים במפתח שלך...")
+    try:
+        # מקבל את הרשימה האמיתית מגוגל
+        list_url = f"https://generativelanguage.googleapis.com/v1beta/models?key={GEMINI_API_KEY}"
+        response = requests.get(list_url)
+        
+        if response.status_code == 200:
+            data = response.json()
+            if 'models' in data:
+                # מחפש מודל שיודע לייצר טקסט (generateContent)
+                for m in data['models']:
+                    if 'generateContent' in m['supportedGenerationMethods']:
+                        model_name = m['name'].replace('models/', '')
+                        print(f"✅ נמצא מודל פתוח: {model_name}")
+                        
+                        # בונה את הכתובת המוכנה לשימוש
+                        current_model_url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
+                        return
+            
+            print("⚠️ לא נמצאו מודלים מתאימים ברשימה של גוגל.")
+        else:
+            print(f"❌ שגיאה בקבלת רשימת מודלים: {response.text}")
+
+    except Exception as e:
+        print(f"❌ שגיאת חיבור בבדיקת מודלים: {e}")
+
+    # ברירת מחדל אם הכל נכשל - מנסים את הישן והטוב
+    print("⚠️ משתמש במודל ברירת מחדל (gemini-pro)")
+    current_model_url = f"https://generativelanguage.googleapis.com/v1/models/gemini-pro:generateContent?key={GEMINI_API_KEY}"
+
+# מפעילים את הבדיקה מיד בהתחלה
+find_working_model()
 
 # ==========================================
-# 🧠 המוח: סורק מודלים (הפתרון לשגיאות 404)
+# 🧠 פונקציית השליחה
 # ==========================================
-def send_to_google_scan(history_text, user_text):
-    """ מנסה רשימה של מודלים עד שאחד עובד """
-    
-    # רשימת כל הכתובות האפשריות. הבוט ינסה אחת-אחת.
-    possible_urls = [
-        # אופציה 1: Pro בגרסה הרשמית (הכי יציב בדרך כלל)
-        f"https://generativelanguage.googleapis.com/v1/models/gemini-pro:generateContent?key={GEMINI_API_KEY}",
-        # אופציה 2: Flash בגרסת בטא
-        f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}",
-        # אופציה 3: Pro בגרסת בטא
-        f"https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key={GEMINI_API_KEY}",
-        # אופציה 4: מודל ישן לגיבוי
-        f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.0-pro:generateContent?key={GEMINI_API_KEY}"
-    ]
-    
+def send_to_google(history_text, user_text):
+    if not current_model_url:
+        return "שגיאת מערכת: לא נמצא מודל AI זמין."
+
     headers = {'Content-Type': 'application/json'}
     payload = {
         "contents": [{
@@ -53,40 +74,27 @@ def send_to_google_scan(history_text, user_text):
         }]
     }
 
-    last_error = ""
-
-    for url in possible_urls:
-        try:
-            # timeout קצר יחסית לכל ניסיון כדי לא להיתקע
-            response = requests.post(url, json=payload, headers=headers, timeout=15)
+    try:
+        # 30 שניות timeout למניעת תקיעות
+        response = requests.post(current_model_url, json=payload, headers=headers, timeout=30)
+        
+        if response.status_code == 200:
+            return response.json()['candidates'][0]['content']['parts'][0]['text']
+        else:
+            error_msg = f"Google Error {response.status_code}: {response.text}"
+            print(error_msg)
+            return "יש לי תקלה טכנית רגעית, אשמח אם תשאיר טלפון."
             
-            if response.status_code == 200:
-                print(f"✅ הצלחנו עם הכתובת: {url}") # לוג לראות מה עבד
-                return response.json()['candidates'][0]['content']['parts'][0]['text']
-            else:
-                print(f"⚠️ נכשל בכתובת: {url} (קוד {response.status_code})")
-                last_error = f"Google Error {response.status_code}"
-                continue
-                
-        except Exception as e:
-            last_error = str(e)
-            continue
-
-    return "יש לי תקלה טכנית רגעית, אשמח אם תשאיר טלפון ואחזור אליך."
+    except Exception as e:
+        print(f"Connection Error: {e}")
+        return "בעיית תקשורת, נסה שוב."
 
 # ==========================================
 # 📩 הנדלרים
 # ==========================================
-async def send_lead_alert(context, name, username, phone, source):
-    msg = f"🔔 <b>ליד חדש!</b>\n👤 {name}\n📱 {phone}\n📝 {source}"
-    try:
-        await context.bot.send_message(chat_id=ADMIN_ID, text=msg, parse_mode='HTML')
-    except: pass
-
-async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    c = update.message.contact
-    await send_lead_alert(context, update.effective_user.first_name, update.effective_user.username, c.phone_number, "כפתור שיתוף")
-    await context.bot.send_message(chat_id=update.effective_chat.id, text="תודה! המספר נקלט.", reply_markup=get_main_keyboard())
+def get_main_keyboard():
+    button = KeyboardButton("📞 שלח את המספר שלי ללינה", request_contact=True)
+    return ReplyKeyboardMarkup([[button]], resize_keyboard=True, one_time_keyboard=False)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text: return
@@ -95,13 +103,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = update.message.text
     user_id = update.effective_user.id
     
-    # זיהוי טלפון
-    phone_pattern = re.compile(r'05\d{1}[- ]?\d{3}[- ]?\d{4}')
-    if phone_pattern.search(user_text):
-        phone = phone_pattern.search(user_text).group(0)
-        await send_lead_alert(context, update.effective_user.first_name, update.effective_user.username, phone, f"טקסט: {user_text}")
-        await context.bot.send_message(chat_id=update.effective_chat.id, text="רשמתי את המספר, תודה!", reply_markup=get_main_keyboard())
-
     # היסטוריה
     if user_id not in chats_history: chats_history[user_id] = []
     history = ""
@@ -110,8 +111,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type == 'private':
         await context.bot.send_chat_action(chat_id=update.effective_chat.id, action='typing')
     
-    # שליחה לגוגל עם הסורק
-    bot_answer = send_to_google_scan(history, user_text)
+    # שליחה לגוגל
+    bot_answer = send_to_google(history, user_text)
     
     chats_history[user_id].append({"role": "user", "text": user_text})
     chats_history[user_id].append({"role": "model", "text": bot_answer})
@@ -120,6 +121,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(chat_id=update.effective_chat.id, text=bot_answer, reply_markup=get_main_keyboard())
     else:
         await context.bot.send_message(chat_id=update.effective_chat.id, text=bot_answer, reply_to_message_id=update.message.message_id)
+
+async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    c = update.message.contact
+    try:
+        await context.bot.send_message(chat_id=ADMIN_ID, text=f"🔔 ליד חדש!\n{c.first_name}\n{c.phone_number}")
+    except: pass
+    await context.bot.send_message(chat_id=update.effective_chat.id, text="תודה! המספר נקלט.", reply_markup=get_main_keyboard())
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chats_history[update.effective_user.id] = []
@@ -132,5 +140,5 @@ if __name__ == '__main__':
     app.add_handler(MessageHandler(filters.CONTACT, handle_contact))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
     
-    print("✅ הבוט רץ - עם flask ותיקון סורק")
+    print("✅ הבוט רץ - עם מנגנון גילוי מודלים אוטומטי")
     app.run_polling()
