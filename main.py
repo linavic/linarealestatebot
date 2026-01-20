@@ -1,8 +1,8 @@
 import os
 import logging
+import asyncio
 import google.generativeai as genai
 from telegram import Update
-from telegram.constants import ChatAction, ChatType
 from telegram.ext import (
     ApplicationBuilder,
     ContextTypes,
@@ -15,115 +15,94 @@ from keep_alive import keep_alive
 # ==========================================
 # ⚙️ הגדרות
 # ==========================================
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
-if not TELEGRAM_BOT_TOKEN:
-    raise RuntimeError("❌ TELEGRAM_BOT_TOKEN חסר")
+# לוגים - כדי שנראה מה קורה במסך השחור
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
+# ==========================================
+# 🧠 הגדרת גוגל (הכי פשוט, הכי יציב)
+# ==========================================
 if not GEMINI_API_KEY:
-    raise RuntimeError("❌ GEMINI_API_KEY חסר")
-
-logging.basicConfig(level=logging.INFO)
-
-# ==========================================
-# 🧠 Gemini – מודל יציב
-# ==========================================
-genai.configure(api_key=GEMINI_API_KEY)
-
-model = genai.GenerativeModel(
-    model_name="gemini-pro"
-)
-
-SYSTEM_PROMPT = (
-    "את Lina, סוכנת נדל\"ן מקצועית בישראל. "
-    "עני תמיד בעברית, בצורה ברורה, קצרה ומקצועית."
-)
+    logger.error("❌ חסר מפתח GEMINI_API_KEY!")
+else:
+    genai.configure(api_key=GEMINI_API_KEY)
+    # מודל gemini-pro הוא היחיד שעובד יציב בחינם כרגע
+    model = genai.GenerativeModel("gemini-pro")
 
 # ==========================================
-# 🧠 פונקציית AI
+# 🧠 הפונקציה שפונה לגוגל
 # ==========================================
-def ask_gemini(user_text: str) -> str:
+def ask_gemini(text):
     try:
-        prompt = f"{SYSTEM_PROMPT}\n\nשאלה: {user_text}"
-
-        response = model.generate_content(
-            prompt,
-            generation_config={
-                "temperature": 0.4,
-                "max_output_tokens": 500,
-            }
-        )
-
-        if not response or not response.text:
-            return "⚠️ לא התקבלה תשובה מהמודל."
-
+        # הנחיה לבוט
+        prompt = f"את לינה, סוכנת נדלן. עני בעברית בקצרה.\nשאלה: {text}\nתשובה:"
+        
+        response = model.generate_content(prompt)
         return response.text.strip()
-
     except Exception as e:
-        logging.exception("Gemini Error")
-        return f"⚠️ שגיאת Gemini:\n{e}"
+        logger.error(f"Error from Google: {e}")
+        return "יש לי תקלה רגעית, נסה שוב."
 
 # ==========================================
 # 📩 טיפול בהודעות
 # ==========================================
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message or not update.message.text:
-        return
+    if not update.message or not update.message.text: return
+    
+    # התעלמות מערוצים (מונע לופים)
+    if update.effective_user.id == 777000: return
 
+    text = update.message.text
     chat_type = update.effective_chat.type
-    message_text = update.message.text
     bot_username = context.bot.username
 
-    # -------------------------------
-    # 🛑 סינון קבוצות
-    # -------------------------------
-    if chat_type in [ChatType.GROUP, ChatType.SUPERGROUP]:
-        mentioned = f"@{bot_username}" in message_text
-        replied_to_bot = (
-            update.message.reply_to_message
-            and update.message.reply_to_message.from_user
-            and update.message.reply_to_message.from_user.username == bot_username
-        )
+    logger.info(f"📩 הודעה התקבלה ({chat_type}): {text}")
 
-        if not mentioned and not replied_to_bot:
-            return  # ❌ מתעלם מהודעה בקבוצה
+    # --- לוגיקה לקבוצות ---
+    # בקבוצה - מגיב רק אם תייגו אותו
+    if chat_type in ['group', 'supergroup']:
+        if f"@{bot_username}" not in text and not (update.message.reply_to_message and update.message.reply_to_message.from_user.id == context.bot.id):
+            return # מתעלם
 
-        # מנקה mention מהטקסט
-        message_text = message_text.replace(f"@{bot_username}", "").strip()
+    # שליחה לגוגל (ברקע)
+    loop = asyncio.get_running_loop()
+    try:
+        response = await loop.run_in_executor(None, ask_gemini, text)
+        
+        # שליחה חזרה לטלגרם
+        if chat_type == 'private':
+            await update.message.reply_text(response)
+        else:
+            await update.message.reply_text(response, quote=True)
+            
+    except Exception as e:
+        logger.error(f"Failed to send message: {e}")
 
-    # -------------------------------
-    # ✍️ חיווי הקלדה
-    # -------------------------------
-    await context.bot.send_chat_action(
-        chat_id=update.effective_chat.id,
-        action=ChatAction.TYPING
-    )
-
-    # -------------------------------
-    # 🤖 תשובת AI
-    # -------------------------------
-    answer = ask_gemini(message_text)
-    await update.message.reply_text(answer)
-
-# ==========================================
-# 🚀 start
-# ==========================================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "👋 שלום! אני Lina, סוכנת נדל\"ן חכמה.\n"
-        "בפרטי – עונה תמיד.\n"
-        "בקבוצה – עונה רק כשמתייגים אותי 😊"
-    )
+    await update.message.reply_text("היי, אני לינה! 🏠")
 
 # ==========================================
-# ▶️ הרצה
+# 🚀 הרצה
 # ==========================================
 if __name__ == "__main__":
     keep_alive()
 
-    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    if not TELEGRAM_BOT_TOKEN:
+        print("❌ חסר טוקן של טלגרם!")
+    else:
+        app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+        app.add_handler(CommandHandler("start", start))
+        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    print("🤖 Bot is running...")
-    app.run_polling()
+        print("🔄 מנקה חיבורים ישנים...")
+        # זה הטריק! מוחק את ה-Webhook התקוע
+        # אבל צריך לעשות את זה ידנית ב-Run Polling, אז פשוט נריץ רגיל:
+        
+        print("✅ הבוט מתחיל לרוץ עכשיו!")
+        app.run_polling(drop_pending_updates=True) # מנקה הודעות תקועות
