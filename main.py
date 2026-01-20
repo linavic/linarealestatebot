@@ -9,15 +9,13 @@ from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, Messa
 from keep_alive import keep_alive
 
 # ==========================================
-# ⚙️ הגדרות (נלקח אוטומטית מה-Secrets)
+# ⚙️ הגדרות
 # ==========================================
-
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
 ADMIN_ID = 1687054059
 
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 # ==========================================
 # 📝 הגדרות בוט
@@ -32,18 +30,13 @@ Important: If the user provides a phone number, thank them and say you will call
 chats_history = {}
 
 # ==========================================
-# 🧠 חיבור לגוגל (עם תיקון המודל!)
+# 🧠 חיבור לגוגל (גרסת v1 היציבה - ללא בטא)
 # ==========================================
 def send_to_google_blocking(history_text, user_text):
-    """ רץ ברקע ומנסה את המודלים שעובדים בטוח """
+    """ שימוש במודל הקלאסי שעובד בכל החשבונות """
     
-    # שינוי קריטי: הסרנו את Flash שגרם לשגיאה 404
-    # שמנו את Pro ראשון כי הוא הכי אמין
-    models_to_try = [
-        "gemini-1.5-pro",         # הכי חזק ויציב
-        "gemini-2.0-flash-exp",   # הכי חדש (אם הפרו נכשל)
-        "gemini-1.0-pro"          # הכי ותיק (גיבוי אחרון)
-    ]
+    # משתמשים ב-v1 הרגיל (לא בטא) ובמודל gemini-pro הרגיל
+    url = f"https://generativelanguage.googleapis.com/v1/models/gemini-pro:generateContent?key={GEMINI_API_KEY}"
     
     headers = {'Content-Type': 'application/json'}
     payload = {
@@ -52,32 +45,20 @@ def send_to_google_blocking(history_text, user_text):
         }]
     }
 
-    last_error = ""
+    try:
+        response = requests.post(url, json=payload, headers=headers, timeout=15)
+        
+        if response.status_code == 200:
+            try:
+                return response.json()['candidates'][0]['content']['parts'][0]['text']
+            except KeyError:
+                return "⚠️ גוגל החזיר תשובה ריקה."
+        else:
+            # אם יש שגיאה - נחזיר אותה לטלגרם כדי שתראי אותה!
+            return f"⚠️ תקלה (קוד {response.status_code}):\n{response.text[:200]}"
 
-    for model in models_to_try:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_API_KEY}"
-        try:
-            # timeout קצר יחסית כדי לא לתקוע את הבוט
-            response = requests.post(url, json=payload, headers=headers, timeout=12)
-            
-            if response.status_code == 200:
-                try:
-                    text = response.json()['candidates'][0]['content']['parts'][0]['text']
-                    return text # הצלחה!
-                except KeyError:
-                    continue 
-            else:
-                print(f"⚠️ מודל {model} נכשל ({response.status_code}), מנסה את הבא...")
-                last_error = f"Error {response.status_code} on {model}"
-                continue
-
-        except Exception as e:
-            last_error = str(e)
-            continue
-
-    # אם הכל נכשל
-    print(f"❌ שגיאה סופית: {last_error}")
-    return "קיבלתי את ההודעה. אני בודקת את הפרטים ואחזור אליך בהקדם."
+    except Exception as e:
+        return f"⚠️ שגיאת חיבור:\n{str(e)}"
 
 # ==========================================
 # 📩 טיפול בהודעות
@@ -86,16 +67,13 @@ def send_to_google_blocking(history_text, user_text):
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         if not update.message or not update.message.text: return
-        # התעלמות מהערוץ עצמו
         if update.effective_user.id == 777000: return
 
         user_text = update.message.text
         user_id = update.effective_user.id
         chat_type = update.effective_chat.type
         
-        print(f"📩 הודעה: {user_text}")
-
-        # 1. זיהוי מספר טלפון
+        # 1. זיהוי טלפון
         phone_pattern = re.compile(r'05\d{1}[- ]?\d{3}[- ]?\d{4}')
         match = phone_pattern.search(user_text)
         if match:
@@ -105,7 +83,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except: pass
             
             await update.message.reply_text("תודה! רשמתי את המספר, לינה תחזור אליך.")
-            # ממשיכים ל-AI למקרה שיש שאלה
+            # אנחנו לא עוצרים כאן, אלא נותנים לבוט לענות גם טקסטואלית אם צריך
 
         # 2. חיווי הקלדה
         if chat_type == 'private':
@@ -117,7 +95,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for msg in chats_history[user_id][-3:]:
             history += f"{msg['role']}: {msg['text']}\n"
 
-        # 4. שליחה לגוגל (ברקע)
+        # 4. שליחה לגוגל
         loop = asyncio.get_running_loop()
         bot_answer = await loop.run_in_executor(None, send_to_google_blocking, history, user_text)
 
@@ -132,6 +110,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     except Exception as e:
         print(f"Error: {e}")
+        await update.message.reply_text("⚠️ שגיאה קריטית בבוט.")
 
 def get_main_keyboard():
     btn = KeyboardButton("📞 שלח מספר טלפון", request_contact=True)
@@ -151,19 +130,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 if __name__ == '__main__':
     keep_alive()
     
-    # מנקה חיבורים ישנים
     if TELEGRAM_BOT_TOKEN:
         try:
             requests.get(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/deleteWebhook?drop_pending_updates=True")
         except: pass
 
     if not TELEGRAM_BOT_TOKEN or not GEMINI_API_KEY:
-         print("❌ שגיאה: מפתחות חסרים ב-Secrets!")
+         print("❌ מפתחות חסרים!")
     else:
         app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
         app.add_handler(CommandHandler('start', start))
         app.add_handler(MessageHandler(filters.CONTACT, handle_contact))
         app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
         
-        print("✅ הבוט רץ! (מודל gemini-1.5-pro מופעל)")
+        print("✅ הבוט רץ! (מודל gemini-pro קלאסי)")
         app.run_polling()
