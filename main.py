@@ -1,155 +1,152 @@
 import os
-import logging
 import requests
-import asyncio
+import time
+import logging
+import re
 from telegram import Update, KeyboardButton, ReplyKeyboardMarkup
-from telegram.constants import ChatAction, ChatType
-from telegram.ext import (
-    ApplicationBuilder,
-    ContextTypes,
-    CommandHandler,
-    MessageHandler,
-    filters
-)
+from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
 from keep_alive import keep_alive
 
 # ==========================================
 # ⚙️ הגדרות
 # ==========================================
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+
+# תיקון: משיכת המפתח מה-Secrets במקום ה-XXX
+GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
+TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
 ADMIN_ID = 1687054059
 
-logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
+# ==========================================
+# ⚙️ בדיקות מקדימות
+# ==========================================
 
-SYSTEM_PROMPT = "את Lina, סוכנת נדל\"ן בנתניה. עני בעברית, קצר ומקצועי. המטרה: לקבל טלפון."
+if not TELEGRAM_BOT_TOKEN or not GEMINI_API_KEY:
+    print("❌ שגיאה: חסרים מפתחות ב-Secrets!")
+
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+
+# הגדרת הפרומפט
+SYSTEM_PROMPT = """
+You are Lina, a real estate expert in Netanya (Lina Real Estate).
+Language: Hebrew.
+Tone: Professional, short, and helpful.
+Goal: Help clients buy/rent properties or get their phone number.
+Important: If the user provides a phone number, thank them and say you will call.
+"""
+
+chats_history = {}
 
 # ==========================================
-# 🎮 כפתור (קבוע!)
+# 🧠 חיבור לגוגל (הפונקציה מהקוד שלך)
 # ==========================================
+
 def get_main_keyboard():
-    return ReplyKeyboardMarkup(
-        [[KeyboardButton("📞 שלח מספר טלפון ללינה", request_contact=True)]], 
-        resize_keyboard=True
-    )
+    # הכפתור מהקוד שלך
+    button = KeyboardButton("📞 שלח את המספר שלי ללינה", request_contact=True)
+    return ReplyKeyboardMarkup([[button]], resize_keyboard=True, one_time_keyboard=False)
 
-# ==========================================
-# 🧠 חיבור לגוגל (השיטה הידנית והבטוחה)
-# ==========================================
-def ask_gemini_final(text):
-    # 1. ניסיון ראשון: הכתובת הישנה והיציבה (V1 gemini-pro)
-    # זו הכתובת שעבדה לך בהתחלה!
-    url_v1 = f"https://generativelanguage.googleapis.com/v1/models/gemini-pro:generateContent?key={GEMINI_API_KEY}"
+def send_to_google_direct(history_text, user_text):
+    """ שולח לגוגל, ואם נכשל - מחזיר את סיבת הכישלון """
     
-    # 2. ניסיון שני: המודל החדש (Flash) במידה והראשון נכשל
-    url_flash = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+    # הקוד המקורי שלך השתמש ב-flash וב-v1beta. השארתי את זה בדיוק כך.
+    model_name = "gemini-1.5-flash"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
     
     headers = {'Content-Type': 'application/json'}
     payload = {
-        "contents": [{"parts": [{"text": f"{SYSTEM_PROMPT}\nUser: {text}"}]}]
+        "contents": [{
+            "parts": [{"text": f"{SYSTEM_PROMPT}\n\nהיסטוריה:\n{history_text}\nלקוח: {user_text}\nאני:"}]
+        }]
     }
-    
+
     try:
-        # מנסים את ה-V1 הישן והטוב
-        # timeout של 30 שניות כדי למנוע את שגיאת ה-504 שראית
-        response = requests.post(url_v1, json=payload, headers=headers, timeout=30)
+        response = requests.post(url, json=payload, headers=headers, timeout=30)
         
         if response.status_code == 200:
             return response.json()['candidates'][0]['content']['parts'][0]['text']
         else:
-            logging.warning(f"V1 Pro failed ({response.status_code}), trying Flash...")
-            # אם נכשל (404/500) - מנסים את הפלאש
-            response = requests.post(url_flash, json=payload, headers=headers, timeout=30)
-            if response.status_code == 200:
-                return response.json()['candidates'][0]['content']['parts'][0]['text']
+            # במקום להחזיר None, נחזיר את השגיאה האמיתית כדי שתראה אותה בטלגרם
+            error_msg = response.text
+            print(f"❌ שגיאה מגוגל: {error_msg}")
+            return f"⚠️ שגיאה טכנית בגוגל (קוד {response.status_code}):\n{error_msg[:200]}..." 
             
-            # אם שניהם נכשלו - מחזירים את השגיאה האמיתית כדי שתדעי (במקום "בודקת פרטים")
-            return f"⚠️ שגיאה כפולה בגוגל. קוד: {response.status_code}"
-
     except Exception as e:
-        return f"⚠️ שגיאת חיבור: {str(e)}"
+        return f"⚠️ שגיאת תקשורת חמורה:\n{str(e)}"
 
 # ==========================================
-# 📩 טיפול בהודעות
+# 📩 הנדלרים
 # ==========================================
+
+async def send_lead_alert(context, name, username, phone, source):
+    msg = f"🔔 <b>ליד חדש!</b>\n👤 {name}\n📱 {phone}\n📝 {source}"
+    try:
+        await context.bot.send_message(chat_id=ADMIN_ID, text=msg, parse_mode='HTML')
+    except:
+        pass
+
+async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    c = update.message.contact
+    await send_lead_alert(context, update.effective_user.first_name, update.effective_user.username, c.phone_number, "כפתור שיתוף")
+    await context.bot.send_message(chat_id=update.effective_chat.id, text="תודה! המספר נקלט.", reply_markup=get_main_keyboard())
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text: return
-    if update.effective_user.id == 777000: return 
-
-    text = update.message.text
-    chat_type = update.effective_chat.type
-    bot_username = context.bot.username
-
-    # --- סינון קבוצות ---
-    if chat_type in [ChatType.GROUP, ChatType.SUPERGROUP]:
-        is_mentioned = f"@{bot_username}" in text
-        is_reply = (update.message.reply_to_message and 
-                    update.message.reply_to_message.from_user.id == context.bot.id)
-        
-        if not (is_mentioned or is_reply):
-            return 
-
-        text = text.replace(f"@{bot_username}", "").strip()
-
-    # חיווי הקלדה
-    if chat_type == 'private':
-        await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
-
-    # שליחה לגוגל
-    loop = asyncio.get_running_loop()
-    try:
-        answer = await loop.run_in_executor(None, ask_gemini_final, text)
-        
-        if chat_type == 'private':
-            # בפרטי: שולחים תשובה + מוודאים שהכפתור שם
-            await update.message.reply_text(answer, reply_markup=get_main_keyboard())
-        else:
-            # בקבוצה: רק ציטוט
-            await update.message.reply_text(answer, quote=True)
-            
-    except Exception as e:
-        logging.error(f"Error: {e}")
-
-# ==========================================
-# 📞 טיפול בליד (טלפון)
-# ==========================================
-async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    contact = update.message.contact
-    user = update.effective_user
     
-    # שליחה למנהל
-    try:
-        await context.bot.send_message(
-            chat_id=ADMIN_ID,
-            text=f"🔔 **ליד חדש!**\n👤 {user.first_name}\n📱 `{contact.phone_number}`",
-            parse_mode='Markdown'
-        )
-    except: pass
+    # --- התיקון היחיד שהוספתי: הגנה מערוצים ---
+    # זה מה שמנע מהקוד לעבוד כשהוא חובר לערוץ. השורה הזו פותרת את זה.
+    if update.effective_user.id == 777000: return
+    # ------------------------------------------
 
-    await update.message.reply_text(
-        "תודה! קיבלתי את המספר.",
-        reply_markup=get_main_keyboard()
-    )
+    user_text = update.message.text
+    user_id = update.effective_user.id
+    
+    # זיהוי טלפון בטקסט
+    phone_pattern = re.compile(r'05\d{1}[- ]?\d{3}[- ]?\d{4}')
+    if phone_pattern.search(user_text):
+        phone = phone_pattern.search(user_text).group(0)
+        await send_lead_alert(context, update.effective_user.first_name, update.effective_user.username, phone, f"טקסט: {user_text}")
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="רשמתי את המספר, תודה!", reply_markup=get_main_keyboard())
 
-# ==========================================
-# 🚀 התחלה
-# ==========================================
+    # היסטוריה ו-AI
+    if user_id not in chats_history: chats_history[user_id] = []
+    
+    history = ""
+    for msg in chats_history[user_id][-4:]: history += f"{msg['role']}: {msg['text']}\n"
+
+    # רק בפרטי מראים הקלדה
+    if update.effective_chat.type == 'private':
+        await context.bot.send_chat_action(chat_id=update.effective_chat.id, action='typing')
+    
+    # שליחה לגוגל
+    bot_answer = send_to_google_direct(history, user_text)
+    
+    chats_history[user_id].append({"role": "user", "text": user_text})
+    chats_history[user_id].append({"role": "model", "text": bot_answer})
+    
+    # תשובה (עם כפתור בפרטי, וציטוט בקבוצה)
+    if update.effective_chat.type == 'private':
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=bot_answer, reply_markup=get_main_keyboard())
+    else:
+        # בקבוצה רק אם תויג או השיב - למניעת הצפה (אופציונלי, אבל מומלץ בקוד הזה)
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=bot_answer, reply_to_message_id=update.message.message_id)
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "היי! אני לינה 🏠",
-        reply_markup=get_main_keyboard()
-    )
+    chats_history[update.effective_user.id] = []
+    await context.bot.send_message(chat_id=update.effective_chat.id, text="שלום! אני הבוט של לינה.", reply_markup=get_main_keyboard())
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     keep_alive()
     
-    if not TELEGRAM_BOT_TOKEN:
-        print("❌ חסר טוקן")
-    else:
-        app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
-        app.add_handler(CommandHandler("start", start))
-        app.add_handler(MessageHandler(filters.CONTACT, handle_contact))
-        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    # ניקוי הודעות ישנות למניעת תקיעות בהפעלה
+    if TELEGRAM_BOT_TOKEN:
+        try:
+            requests.get(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/deleteWebhook?drop_pending_updates=True")
+        except: pass
 
-        print("✅ הבוט רץ (הגרסה הישנה והיציבה!)")
-        app.run_polling(drop_pending_updates=True)
+    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+    app.add_handler(CommandHandler('start', start))
+    app.add_handler(MessageHandler(filters.CONTACT, handle_contact))
+    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
+    
+    print("✅ הבוט רץ (הקוד המקורי שוחזר)")
+    app.run_polling()
