@@ -4,7 +4,7 @@ import logging
 import re
 from telegram import Update, KeyboardButton, ReplyKeyboardMarkup
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
-from keep_alive import keep_alive  # זה מה שדורש את flask!
+from keep_alive import keep_alive  # דורש את flask שהחזרנו
 
 # ==========================================
 # ⚙️ הגדרות
@@ -29,21 +29,21 @@ def get_main_keyboard():
     return ReplyKeyboardMarkup([[button]], resize_keyboard=True, one_time_keyboard=False)
 
 # ==========================================
-# 🧠 המוח: סורק מודלים אוטומטי (הפתרון ל-404)
+# 🧠 המוח: סורק מודלים (הפתרון לשגיאות 404)
 # ==========================================
 def send_to_google_scan(history_text, user_text):
     """ מנסה רשימה של מודלים עד שאחד עובד """
     
-    # הרשימה המלאה - הבוט ינסה אותם אחד אחד
+    # רשימת כל הכתובות האפשריות. הבוט ינסה אחת-אחת.
     possible_urls = [
-        # אופציה 1: Pro בגרסה הרשמית (בדרך כלל הכי יציב)
+        # אופציה 1: Pro בגרסה הרשמית (הכי יציב בדרך כלל)
         f"https://generativelanguage.googleapis.com/v1/models/gemini-pro:generateContent?key={GEMINI_API_KEY}",
-        # אופציה 2: Flash בגרסת בטא (הכי מהיר)
+        # אופציה 2: Flash בגרסת בטא
         f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}",
         # אופציה 3: Pro בגרסת בטא
         f"https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key={GEMINI_API_KEY}",
-        # אופציה 4: מודל ישן יותר לגיבוי
-        f"https://generativelanguage.googleapis.com/v1/models/gemini-1.0-pro:generateContent?key={GEMINI_API_KEY}"
+        # אופציה 4: מודל ישן לגיבוי
+        f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.0-pro:generateContent?key={GEMINI_API_KEY}"
     ]
     
     headers = {'Content-Type': 'application/json'}
@@ -57,24 +57,21 @@ def send_to_google_scan(history_text, user_text):
 
     for url in possible_urls:
         try:
-            # timeout של 20 שניות למניעת תקיעות
-            response = requests.post(url, json=payload, headers=headers, timeout=20)
+            # timeout קצר יחסית לכל ניסיון כדי לא להיתקע
+            response = requests.post(url, json=payload, headers=headers, timeout=15)
             
             if response.status_code == 200:
-                # יש! מצאנו מודל שעובד
+                print(f"✅ הצלחנו עם הכתובת: {url}") # לוג לראות מה עבד
                 return response.json()['candidates'][0]['content']['parts'][0]['text']
             else:
-                # נכשל, ממשיכים למודל הבא
                 print(f"⚠️ נכשל בכתובת: {url} (קוד {response.status_code})")
                 last_error = f"Google Error {response.status_code}"
                 continue
                 
         except Exception as e:
-            print(f"⚠️ שגיאת חיבור: {e}")
             last_error = str(e)
             continue
 
-    # אם יצאנו מהלולאה וכלום לא עבד
     return "יש לי תקלה טכנית רגעית, אשמח אם תשאיר טלפון ואחזור אליך."
 
 # ==========================================
@@ -135,5 +132,5 @@ if __name__ == '__main__':
     app.add_handler(MessageHandler(filters.CONTACT, handle_contact))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
     
-    print("✅ הבוט רץ (הוספנו flask ותיקון סורק)")
+    print("✅ הבוט רץ - עם flask ותיקון סורק")
     app.run_polling()
