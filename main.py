@@ -18,7 +18,10 @@ if not TELEGRAM_BOT_TOKEN or not GEMINI_API_KEY:
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
-SYSTEM_PROMPT = "את Lina, סוכנת נדל\"ן בנתניה. עני בעברית, קצר ומקצועי."
+SYSTEM_PROMPT = """את Lina, סוכנת נדל"ן בנתניה. את מומחית בנדל"ן, אדיבה ומועילה.
+תמיד עני בעברית, קצר ומקצועי.
+אל תמציא מידע על נכסים שאין לך.
+אם מישהו שולח לך מספר טלפון, תגידי "רשמתי את המספר, תודה!" ותזכירי שאת זמינה בווטסאפ."""
 
 chats_history = {}
 
@@ -30,49 +33,95 @@ def get_main_keyboard():
     return ReplyKeyboardMarkup([[button]], resize_keyboard=True, one_time_keyboard=False)
 
 # ==========================================
-# 🧠 חיבור לגוגל ("מפתח מאסטר" - מנסה הכל)
+# 🧠 חיבור לגוגל Gemini
 # ==========================================
-def send_to_google_direct(history_text, user_text):
-    """ מנסה 3 גרסאות שונות של גוגל עד להצלחה """
+def send_to_google_gemini(history_text, user_text):
+    """ שולח הודעה ל-Google Gemini API """
     
-    # רשימת הכתובות האפשריות (מהחדש לישן)
-    endpoints = [
-        # אופציה 1: המודל הכי חדש (Flash) בגרסת בטא
-        f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}",
-        # אופציה 2: המודל היציב (Pro) בגרסה הרשמית
-        f"https://generativelanguage.googleapis.com/v1/models/gemini-pro:generateContent?key={GEMINI_API_KEY}",
-        # אופציה 3: המודל הישן (1.0 Pro) בגרסת בטא (גיבוי חירום)
-        f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.0-pro:generateContent?key={GEMINI_API_KEY}"
-    ]
+    # גרסת API עדכנית (גרסה 1 יציבה)
+    url = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash-latest:generateContent?key={GEMINI_API_KEY}"
     
     headers = {'Content-Type': 'application/json'}
+    
+    # מערכת ההיסטוריה
+    contents = []
+    
+    # הוספת הנחיית המערכת
+    contents.append({
+        "role": "user",
+        "parts": [{"text": SYSTEM_PROMPT}]
+    })
+    contents.append({
+        "role": "model",
+        "parts": [{"text": "בסדר, אני מוכנה לעזור כסוכנת הנדל\"ן לינה."}]
+    })
+    
+    # הוספת ההיסטוריה
+    if history_text:
+        contents.append({
+            "role": "user",
+            "parts": [{"text": f"הנה היסטוריית השיחה:\n{history_text}"}]
+        })
+    
+    # הוספת ההודעה הנוכחית
+    contents.append({
+        "role": "user",
+        "parts": [{"text": user_text}]
+    })
+    
     payload = {
-        "contents": [{
-            "parts": [{"text": f"{SYSTEM_PROMPT}\n\nהיסטוריה:\n{history_text}\nלקוח: {user_text}\nאני:"}]
-        }]
+        "contents": contents,
+        "generationConfig": {
+            "temperature": 0.7,
+            "topP": 0.8,
+            "topK": 40,
+            "maxOutputTokens": 500,
+        },
+        "safetySettings": [
+            {
+                "category": "HARM_CATEGORY_HARASSMENT",
+                "threshold": "BLOCK_MEDIUM_AND_ABOVE"
+            }
+        ]
     }
 
-    last_error = ""
-
-    # לולאה שמנסה את הכתובות אחת אחרי השנייה
-    for url in endpoints:
-        try:
-            response = requests.post(url, json=payload, headers=headers, timeout=30)
-            
-            if response.status_code == 200:
-                # הצלחה! מחזירים את התשובה ויוצאים
-                return response.json()['candidates'][0]['content']['parts'][0]['text']
+    try:
+        response = requests.post(url, json=payload, headers=headers, timeout=30)
+        
+        if response.status_code == 200:
+            result = response.json()
+            if 'candidates' in result and len(result['candidates']) > 0:
+                return result['candidates'][0]['content']['parts'][0]['text']
             else:
-                last_error = f"Error {response.status_code}: {response.text}"
-                print(f"⚠️ ניסיון נכשל בכתובת {url}: {response.status_code}")
-                continue # מנסה את הכתובת הבאה
-                
-        except Exception as e:
-            last_error = str(e)
-            continue
+                return "לא הצלחתי לקבל תשובה מהמערכת. נסה שוב או פנה ישירות לווטסאפ."
+        else:
+            error_msg = f"שגיאה {response.status_code}: "
+            if response.status_code == 404:
+                error_msg += "המודל לא נמצא. בדוק את שם המודל."
+            elif response.status_code == 400:
+                error_msg += "בקשה לא תקינה. ייתכן שהקלט ארוך מדי."
+            elif response.status_code == 403:
+                error_msg += "אין הרשאות. בדוק את ה-API Key."
+            elif response.status_code == 429:
+                error_msg += "יותר מדי בקשות. המתן מעט."
+            else:
+                error_msg += response.text[:200]
+            
+            logging.error(f"שגיאת Gemini: {error_msg}")
+            
+            # הודעה ידידותית למשתמש
+            return f"""לא הצלחתי להגיב כרגע דרך המערכת. 
 
-    # אם כל 3 הכתובות נכשלו
-    return f"⚠️ שגיאה סופית בגוגל (כל המודלים נכשלו):\n{last_error}"
+לשירות מהיר יותר, אתה מוזמן לפנות ישירות:
+📱 ווטסאפ: https://wa.me/972544326270
+📞 טלפון: 054-4326270
+📧 מייל: office@linarealestate.net
+
+אשמח לעזור לך עם כל שאלה בנדל"ן! 🏠"""
+                
+    except Exception as e:
+        logging.error(f"שגיאה בחיבור ל-Gemini: {str(e)}")
+        return "יש בעיה בחיבור למערכת. נסה שוב מאוחר יותר או פנה ישירות לווטסאפ."
 
 # ==========================================
 # 📩 הנדלרים
@@ -82,56 +131,133 @@ async def send_lead_alert(context, name, username, phone, source):
     msg = f"🔔 <b>ליד חדש!</b>\n👤 {name}\n📱 {phone}\n📝 {source}"
     try:
         await context.bot.send_message(chat_id=ADMIN_ID, text=msg, parse_mode='HTML')
-    except: pass
+    except Exception as e:
+        logging.error(f"שגיאה בשליחת התראה: {str(e)}")
 
 async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
     c = update.message.contact
     await send_lead_alert(context, update.effective_user.first_name, update.effective_user.username, c.phone_number, "כפתור שיתוף")
-    await context.bot.send_message(chat_id=update.effective_chat.id, text="תודה! המספר נקלט.", reply_markup=get_main_keyboard())
+    await context.bot.send_message(
+        chat_id=update.effective_chat.id, 
+        text="תודה! המספר נקלט. אחזור אליך בהקדם.\n\nלשירות מהיר יותר, תוכל לפנות גם לווטסאפ:\nhttps://wa.me/972544326270",
+        reply_markup=get_main_keyboard()
+    )
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message or not update.message.text: return
-    if update.effective_user.id == 777000: return # מונע לופים בערוץ
-
+    if not update.message or not update.message.text: 
+        return
+    
+    # התעלמות מהודעות מערוצים
+    if update.effective_user.id == 777000: 
+        return
+    
     user_text = update.message.text
     user_id = update.effective_user.id
     
-    # זיהוי טלפון
+    # זיהוי טלפון בהודעה
     phone_pattern = re.compile(r'05\d{1}[- ]?\d{3}[- ]?\d{4}')
-    if phone_pattern.search(user_text):
-        phone = phone_pattern.search(user_text).group(0)
+    phone_match = phone_pattern.search(user_text)
+    
+    if phone_match:
+        phone = phone_match.group(0)
         await send_lead_alert(context, update.effective_user.first_name, update.effective_user.username, phone, f"טקסט: {user_text}")
-        await context.bot.send_message(chat_id=update.effective_chat.id, text="רשמתי את המספר, תודה!", reply_markup=get_main_keyboard())
-
-    # היסטוריה
-    if user_id not in chats_history: chats_history[user_id] = []
-    history = ""
-    for msg in chats_history[user_id][-4:]: history += f"{msg['role']}: {msg['text']}\n"
-
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id, 
+            text="רשמתי את המספר, תודה! אחזור אליך בהקדם.\n\nלשירות מהיר יותר, תוכל לפנות גם לווטסאפ:\nhttps://wa.me/972544326270",
+            reply_markup=get_main_keyboard()
+        )
+        return  # לא ממשיכים לעיבוד נוסף אחרי זיהוי טלפון
+    
+    # ניהול היסטוריה
+    if user_id not in chats_history: 
+        chats_history[user_id] = []
+    
+    # שמירת היסטוריה מוגבלת (4 הודעות אחרונות מכל צד)
+    history_list = chats_history[user_id]
+    if len(history_list) > 8:  # 4 הודעות משתמש + 4 הודעות בוט
+        history_list = history_list[-8:]
+    
+    history_text = ""
+    for msg in history_list:
+        role_name = "משתמש" if msg['role'] == "user" else "לינה"
+        history_text += f"{role_name}: {msg['text']}\n"
+    
+    # שליחת פעולת הקלדה
     if update.effective_chat.type == 'private':
         await context.bot.send_chat_action(chat_id=update.effective_chat.id, action='typing')
     
-    # שליחה לגוגל עם המנגנון החכם
-    bot_answer = send_to_google_direct(history, user_text)
+    # קבלת תשובה מ-Gemini
+    bot_answer = send_to_google_gemini(history_text, user_text)
     
+    # עדכון היסטוריה
     chats_history[user_id].append({"role": "user", "text": user_text})
     chats_history[user_id].append({"role": "model", "text": bot_answer})
     
+    # שליחת התשובה
     if update.effective_chat.type == 'private':
-        await context.bot.send_message(chat_id=update.effective_chat.id, text=bot_answer, reply_markup=get_main_keyboard())
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id, 
+            text=bot_answer, 
+            reply_markup=get_main_keyboard(),
+            disable_web_page_preview=True
+        )
     else:
-        await context.bot.send_message(chat_id=update.effective_chat.id, text=bot_answer, reply_to_message_id=update.message.message_id)
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id, 
+            text=bot_answer, 
+            reply_to_message_id=update.message.message_id,
+            disable_web_page_preview=True
+        )
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chats_history[update.effective_user.id] = []
-    await context.bot.send_message(chat_id=update.effective_chat.id, text="היי! אני לינה נדל\"ן 🏠", reply_markup=get_main_keyboard())
+    welcome_msg = """היי! אני לינה נדל"ן 🏠
 
+אני כאן לעזור לך בכל שאלה בנושא נדל"ן בנתניה והסביבה.
+
+לשירות מהיר ואישי יותר, מומלץ לפנות ישירות לווטסאפ:
+📱 https://wa.me/972544326270
+
+או ליצור קשר דרך:
+📞 טלפון: 054-4326270
+📧 מייל: office@linarealestate.net
+
+אשמח לעזור לך למכור, לקנות או להשכיר נכס!"""
+    
+    await context.bot.send_message(
+        chat_id=update.effective_chat.id, 
+        text=welcome_msg, 
+        reply_markup=get_main_keyboard(),
+        disable_web_page_preview=True
+    )
+
+# ==========================================
+# 🚀 הפעלת הבוט
+# ==========================================
 if __name__ == '__main__':
     keep_alive()
+    
+    # בדיקה שהמפתחות קיימים
+    if not TELEGRAM_BOT_TOKEN:
+        print("❌ שגיאה: חסר TELEGRAM_BOT_TOKEN")
+        exit(1)
+    if not GEMINI_API_KEY:
+        print("❌ שגיאה: חסר GEMINI_API_KEY")
+        exit(1)
+    
+    # בניית האפליקציה
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+    
+    # הוספת handlers
     app.add_handler(CommandHandler('start', start))
     app.add_handler(MessageHandler(filters.CONTACT, handle_contact))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
     
-    print("✅ הבוט רץ (מצב מפתח מאסטר - מנסה את כל האפשרויות)")
-    app.run_polling()
+    print("✅ הבוט רץ עם גרסת Gemini מעודכנת!")
+    print("📱 שם הבוט: LinaRealEstateBot")
+    print("🧠 משתמש במודל: gemini-1.5-flash-latest")
+    
+    try:
+        app.run_polling(drop_pending_updates=True)
+    except Exception as e:
+        print(f"❌ שגיאה קריטית: {str(e)}")
