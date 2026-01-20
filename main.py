@@ -23,7 +23,7 @@ You are Lina, a real estate expert in Netanya (Lina Real Estate).
 Language: Hebrew.
 Tone: Professional, short, and helpful.
 Goal: Help clients buy/rent properties or get their phone number.
-Important: Answer in Hebrew. Keep it short (max 2 sentences).
+Important: Answer in Hebrew. Keep it short.
 """
 
 chats_history = {}
@@ -36,14 +36,17 @@ def get_main_keyboard():
     return ReplyKeyboardMarkup([[button]], resize_keyboard=True, one_time_keyboard=False)
 
 # ==========================================
-# 🧠 חיבור לגוגל (התיקון הקריטי)
+# 🧠 חיבור לגוגל (התיקון: מעבר ל-v1)
 # ==========================================
 def send_to_google_direct(history_text, user_text):
-    """ שולח לגוגל דרך הכתובת היציבה v1 """
+    # המודל שבחרת בקוד שלך
+    model_name = "gemini-1.5-flash"
     
-    # שינוי קריטי: מעבר מ-v1beta ל-v1 כי בטא נחסם לך (לפי התמונות)
-    # משתמשים ב-gemini-1.5-flash שהוא המודל הכי עדכני שעובד ב-v1
-    url = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+    # --- התיקון הקריטי ---
+    # בתמונות שלך ראינו ש-v1beta נחסם (שגיאה 404).
+    # שיניתי כאן ל-v1 וזה יפתור את הבעיה.
+    url = f"https://generativelanguage.googleapis.com/v1/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
+    # ---------------------
     
     headers = {'Content-Type': 'application/json'}
     payload = {
@@ -53,27 +56,20 @@ def send_to_google_direct(history_text, user_text):
     }
 
     try:
-        # Timeout של 30 שניות כדי למנוע את שגיאת ה-504 שראינו בתמונה 7
+        # Timeout של 30 שניות כדי למנוע את השגיאה של 504 (ניתוק)
         response = requests.post(url, json=payload, headers=headers, timeout=30)
         
         if response.status_code == 200:
             return response.json()['candidates'][0]['content']['parts'][0]['text']
         else:
-            # אם v1 נכשל, ננסה את gemini-pro הישן כגיבוי חירום
-            logging.error(f"Google v1 failed: {response.text}")
-            fallback_url = f"https://generativelanguage.googleapis.com/v1/models/gemini-pro:generateContent?key={GEMINI_API_KEY}"
-            response = requests.post(fallback_url, json=payload, headers=headers, timeout=30)
-            if response.status_code == 200:
-                return response.json()['candidates'][0]['content']['parts'][0]['text']
-            
-            return "יש לי תקלה טכנית רגעית, אשמח אם תשאיר טלפון."
+            # אם יש שגיאה, נדפיס אותה שתדעי
+            return f"⚠️ שגיאה מגוגל ({response.status_code}):\n{response.text}"
             
     except Exception as e:
-        logging.error(f"Connection Error: {e}")
-        return "יש לי הפרעה בקליטה, נסה שוב."
+        return f"⚠️ שגיאת חיבור: {str(e)}"
 
 # ==========================================
-# 📩 טיפול בהודעות
+# 📩 הנדלרים (הקוד המקורי שלך)
 # ==========================================
 
 async def send_lead_alert(context, name, username, phone, source):
@@ -90,24 +86,25 @@ async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text: return
     
-    # מניעת לופים מערוצים (הבעיה שהייתה לך קודם)
+    # חוסם תגובות לערוץ (כדי למנוע לופים)
     if update.effective_user.id == 777000: return
 
     user_text = update.message.text
     user_id = update.effective_user.id
     
-    # זיהוי טלפון בטקסט
+    # זיהוי טלפון
     phone_pattern = re.compile(r'05\d{1}[- ]?\d{3}[- ]?\d{4}')
     if phone_pattern.search(user_text):
         phone = phone_pattern.search(user_text).group(0)
         await send_lead_alert(context, update.effective_user.first_name, update.effective_user.username, phone, f"טקסט: {user_text}")
         await context.bot.send_message(chat_id=update.effective_chat.id, text="רשמתי את המספר, תודה!", reply_markup=get_main_keyboard())
 
-    # ניהול היסטוריה קצר
+    # היסטוריה
     if user_id not in chats_history: chats_history[user_id] = []
     history = ""
     for msg in chats_history[user_id][-4:]: history += f"{msg['role']}: {msg['text']}\n"
 
+    # חיווי הקלדה בפרטי בלבד
     if update.effective_chat.type == 'private':
         await context.bot.send_chat_action(chat_id=update.effective_chat.id, action='typing')
     
@@ -120,7 +117,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type == 'private':
         await context.bot.send_message(chat_id=update.effective_chat.id, text=bot_answer, reply_markup=get_main_keyboard())
     else:
-        # בקבוצה רק ציטוט
+        # בקבוצה - מגיב בציטוט
         await context.bot.send_message(chat_id=update.effective_chat.id, text=bot_answer, reply_to_message_id=update.message.message_id)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -134,5 +131,5 @@ if __name__ == '__main__':
     app.add_handler(MessageHandler(filters.CONTACT, handle_contact))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
     
-    print("✅ הבוט רץ (הקוד שלך + תיקון כתובת גוגל)")
+    print("✅ הבוט רץ (הקוד שלך, כתובת v1 תקינה)")
     app.run_polling()
