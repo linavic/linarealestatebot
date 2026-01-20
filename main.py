@@ -13,40 +13,40 @@ GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
 ADMIN_ID = 1687054059
 
-# כמות שאלות לפני המעבר לסוכן (3 הודעות זה אופטימלי: פתיחה -> שאלה 1 -> שאלה 2 -> סוכן)
+# מספר שאלות שהבוט ישאל לפני שיעביר לסוכן
 MAX_MESSAGES = 3 
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
 # ==========================================
-# 🧠 המוח החדש (איסור מוחלט לבקש טלפון!)
+# 🧠 המוח החדש (הוראות בעברית למניעת בלבול)
 # ==========================================
 SYSTEM_PROMPT = """
-You are the smart assistant for 'Lina Real Estate' in Netanya.
-Language: Hebrew.
-Tone: Professional, polite, curious.
-Your Goal: Gather information about the client's needs (Rent/Buy, Budget, Area, Rooms).
+התפקיד שלך: את המזכירה החכמה של סוכנות הנדל"ן "Lina Real Estate" בנתניה.
+המטרה: לסנן את הלקוח ולהבין מה הוא מחפש לפני שמעבירים אותו לסוכן.
 
-CRITICAL RULES:
-1. **NEVER ask for a phone number or contact details.** Your job is only to ask about the property needs.
-2. If the user answers, ask the next relevant question (e.g., "What is your budget?", "How many rooms?").
-3. Keep answers short (1-2 sentences).
-4. Be helpful and pleasant.
+הוראות התנהגות קריטיות:
+1. אל תבקשי מספר טלפון אף פעם. המערכת תעשה את זה בסוף.
+2. תשאלי שאלות קצרות וממוקדות (אחת בכל פעם).
+3. אם הלקוח אומר "היי", תשאלי: "האם את/ה מחפש/ת לקנות או לשכור?"
+4. אם הלקוח אמר "לשכור" או "לקנות", תשאלי: "באיזה תקציב וכמה חדרים?"
+5. אם הלקוח ענה, תשאלי: "יש אזור ספציפי בנתניה שמעניין אותך?"
+6. תהיי נחמדה, מקצועית ועניינית.
 """
 
 chats_history = {}
 current_model_url = ""
 
 # ==========================================
-# 🔍 סורק מודלים
+# 🔍 סורק מודלים (למניעת תקלות)
 # ==========================================
 def find_working_model():
     global current_model_url
+    # מנסה למצוא את המודל הכי יציב
     possible_urls = [
-        f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}",
         f"https://generativelanguage.googleapis.com/v1/models/gemini-pro:generateContent?key={GEMINI_API_KEY}",
-        f"https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key={GEMINI_API_KEY}",
-        f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+        f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}",
+        f"https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key={GEMINI_API_KEY}"
     ]
     for url in possible_urls:
         try:
@@ -55,7 +55,8 @@ def find_working_model():
                 print(f"✅ מודל נבחר: {url}")
                 return
         except: continue
-    print("⚠️ משתמש בברירת מחדל (Pro)")
+    
+    # ברירת מחדל
     current_model_url = f"https://generativelanguage.googleapis.com/v1/models/gemini-pro:generateContent?key={GEMINI_API_KEY}"
 
 find_working_model()
@@ -67,16 +68,18 @@ def send_to_google(history_text, user_text):
     headers = {'Content-Type': 'application/json'}
     payload = {
         "contents": [{
-            "parts": [{"text": f"{SYSTEM_PROMPT}\n\nהיסטוריה קודמת:\n{history_text}\nלקוח: {user_text}\nאני (הבוט):"}]
+            "parts": [{"text": f"{SYSTEM_PROMPT}\n\nהיסטוריה קודמת:\n{history_text}\nלקוח: {user_text}\nאני (המזכירה):"}]
         }]
     }
     try:
         response = requests.post(current_model_url, json=payload, headers=headers, timeout=15)
         if response.status_code == 200:
             return response.json()['candidates'][0]['content']['parts'][0]['text']
-        return "אני מבין. אשמח לשמוע עוד פרטים."
+        else:
+            # תיקון קריטי: אם יש שגיאה, לא לבקש טלפון ישר!
+            return "לא הבנתי בדיוק, תוכל לפרט שוב?"
     except:
-        return "אני מקשיב, ספר לי עוד."
+        return "יש לי הפרעה קטנה בקליטה, אפשר לחזור על המשפט?"
 
 # ==========================================
 # 📩 לוגיקה ראשית
@@ -91,42 +94,44 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = update.message.text
     user_id = update.effective_user.id
     
-    # 1. תפיסת מספר טלפון (אם הלקוח רושם ביוזמתו)
+    # 1. בדיקה אם הלקוח שלח טלפון בטקסט (תמיד עובד)
     phone_pattern = re.compile(r'05\d{1}[- ]?\d{3}[- ]?\d{4}')
     if phone_pattern.search(user_text):
         phone = phone_pattern.search(user_text).group(0)
         try:
             await context.bot.send_message(chat_id=ADMIN_ID, text=f"🔔 ליד חדש (מתוך טקסט)!\n👤 {update.effective_user.first_name}\n📱 {phone}\n📝 תוכן: {user_text}")
         except: pass
-        await context.bot.send_message(chat_id=update.effective_chat.id, text="תודה רבה! רשמתי את הפרטים. סוכן יחזור אליך בהקדם. 🏠", reply_markup=get_main_keyboard())
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="תודה! רשמתי את הפרטים. סוכן יצור איתך קשר בהקדם. 🏠", reply_markup=get_main_keyboard())
         return
 
     # ניהול היסטוריה
     if user_id not in chats_history: chats_history[user_id] = []
     
-    # 2. חיתוך לשיחה אנושית (אחרי שהבוט שאל 2-3 שאלות)
+    # 2. חיתוך לשיחה אנושית (רק אחרי 3 סבבים של שאלות ותשובות)
+    # כל סבב = 2 הודעות (לקוח + בוט), אז 3 סבבים = 6 הודעות.
     if len(chats_history[user_id]) >= (MAX_MESSAGES * 2):
         cut_msg = (
-            "תודה על המידע! 😊\n"
-            "כדי לתת לך מענה מקצועי ולהציע לך מספר נכסים שמתאימים בדיוק למה שאתה מחפש, "
-            "עדיף שאקשר אותך כעת לסוכן אנושי להמשך טיפול אישי.\n\n"
-            "👇 אנא לחץ על הכפתור למטה להשארת נייד, ונחזור אליך בהקדם."
+            "תודה רבה על כל הפרטים! 😊\n"
+            "יש לי מספיק מידע כדי להתאים לך נכסים מצוינים.\n\n"
+            "כדי שסוכן אנושי יוכל לחזור אליך עם ההצעות, אנא לחץ על הכפתור למטה 👇"
         )
         await context.bot.send_message(chat_id=update.effective_chat.id, text=cut_msg, reply_markup=get_main_keyboard())
         return 
 
-    # שליחה ל-AI לניהול שיחה
+    # הכנת השיחה ל-AI
     history = ""
     for msg in chats_history[user_id][-6:]: history += f"{msg['role']}: {msg['text']}\n"
 
     if update.effective_chat.type == 'private':
         await context.bot.send_chat_action(chat_id=update.effective_chat.id, action='typing')
     
+    # שליחה לגוגל
     bot_answer = send_to_google(history, user_text)
     
     chats_history[user_id].append({"role": "user", "text": user_text})
     chats_history[user_id].append({"role": "model", "text": bot_answer})
     
+    # תשובה למשתמש
     if update.effective_chat.type == 'private':
         await context.bot.send_message(chat_id=update.effective_chat.id, text=bot_answer, reply_markup=get_main_keyboard())
     else:
@@ -137,10 +142,10 @@ async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         await context.bot.send_message(chat_id=ADMIN_ID, text=f"🔔 ליד חדש (כפתור)!\n👤 {c.first_name}\n📱 {c.phone_number}")
     except: pass
-    await context.bot.send_message(chat_id=update.effective_chat.id, text="תודה! המספר התקבל, נעביר אותו מיד לסוכן המטפל. 🏠", reply_markup=get_main_keyboard())
+    await context.bot.send_message(chat_id=update.effective_chat.id, text="המספר התקבל בהצלחה! העברתי את התיק לסוכן המטפל. 🏠", reply_markup=get_main_keyboard())
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chats_history[update.effective_user.id] = [] # איפוס
+    chats_history[update.effective_user.id] = [] # איפוס היסטוריה בהתחלה
     # הנוסח המדויק שביקשת
     welcome_msg = "שלום, אני הבוט של הסוכנות Lina Real Estate בנתניה, במה אוכל לעזור לך היום?"
     await context.bot.send_message(chat_id=update.effective_chat.id, text=welcome_msg, reply_markup=get_main_keyboard())
@@ -152,5 +157,5 @@ if __name__ == '__main__':
     app.add_handler(MessageHandler(filters.CONTACT, handle_contact))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
     
-    print("✅ הבוט רץ (התסריט המדויק שלך)")
+    print("✅ הבוט רץ - גרסה חכמה (מכירה והשכרה)")
     app.run_polling()
