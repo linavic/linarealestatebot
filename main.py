@@ -5,15 +5,15 @@ import logging
 import re
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
-from keep_alive import keep_alive  # מחבר אותנו לקובץ שמשאיר את הבוט ער
+from keep_alive import keep_alive
 
 # ==========================================
 # ⚙️ הגדרות (Settings)
 # ==========================================
 
-# תיקנתי לך את ה-ID לפורמט התקין של ערוץ טלגרם (חייב להתחיל ב -100)
-# אם זה לא עובד, נסה להחזיר למספר המקורי ללא ה-100 בהתחלה
-TARGET_CHANNEL_ID = -1001687054059
+# תיקון קריטי: המספר 1687054059 הוא מזהה משתמש (User ID).
+# לא מוסיפים לו -100 (זה רק לערוצים). ככה הבוט ישלח הודעה ישירות אליך.
+ADMIN_ID = 1687054059
 
 PROMPT_FILE_NAME = "prompt_realtor.txt"
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
@@ -40,16 +40,11 @@ chats_history = {}
 # ==========================================
 
 def send_to_google_direct(history_text, user_text):
-    """
-    שולח בקשה לגוגל דרך HTTP ישיר (עוקף באגים של ספריות).
-    מנסה מודלים שונים לפי סדר עדיפות.
-    """
-    # סדר הניסיונות: הכי חדש -> לייט -> רגיל
+    """ שולח בקשה לגוגל דרך HTTP ישיר """
     models_to_try = [
-        "gemini-2.5-flash", 
-        "gemini-2.0-flash-lite-preview-02-05", 
         "gemini-2.0-flash",
-        "gemini-1.5-flash" 
+        "gemini-1.5-flash",
+        "gemini-1.5-pro"
     ]
     
     headers = {'Content-Type': 'application/json'}
@@ -63,79 +58,92 @@ def send_to_google_direct(history_text, user_text):
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
         try:
             response = requests.post(url, json=payload, headers=headers)
-            
-            # הצלחה (200)
             if response.status_code == 200:
                 return response.json()['candidates'][0]['content']['parts'][0]['text']
-            
-            # עומס (429) - נחכה קצת וננסה את המודל הבא
             elif response.status_code == 429:
-                time.sleep(1) 
+                time.sleep(1)
                 continue
-                
-            # שגיאות אחרות (כמו 404 מודל לא נמצא) - פשוט ממשיכים הבא
             else:
                 continue
-
         except Exception as e:
             print(f"Error connecting to {model_name}: {e}")
             continue
             
-    return None # אם הכל נכשל
+    return None
 
-async def check_for_lead(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """ בודק אם יש טלפון ושולח לערוץ """
+async def send_lead_alert(context: ContextTypes.DEFAULT_TYPE, name, username, phone, source_text=""):
+    """ פונקציית עזר לשליחת ההתראה למנהל """
+    alert_text = (
+        f"🔔 <b>ליד חדש התקבל!</b>\n"
+        f"➖➖➖➖➖➖➖\n"
+        f"👤 <b>שם:</b> {name}\n"
+        f"🔗 <b>יוזר:</b> @{username if username else 'אין'}\n"
+        f"📱 <b>טלפון:</b> {phone}\n"
+        f"📝 <b>תוכן/מקור:</b> {source_text}"
+    )
+    try:
+        await context.bot.send_message(chat_id=ADMIN_ID, text=alert_text, parse_mode='HTML')
+        print(f"✅ ליד נשלח בהצלחה ל-ID: {ADMIN_ID}")
+    except Exception as e:
+        print(f"❌ שגיאה בשליחה למנהל: {e}")
+
+# --- פונקציה חדשה: מטפלת בכרטיס איש קשר (הכפתור) ---
+async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """ מטפל במי ששלח את המספר דרך כפתור שיתוף """
+    contact = update.message.contact
+    user_name = update.effective_user.first_name
+    username = update.effective_user.username
+    phone_number = contact.phone_number
+
+    print(f"📞 התקבל איש קשר: {phone_number}")
+
+    # 1. שליחת התראה ללינה
+    await send_lead_alert(context, user_name, username, phone_number, source_text="שיתוף איש קשר")
+
+    # 2. תגובה ללקוח
+    await context.bot.send_message(
+        chat_id=update.effective_chat.id, 
+        text="תודה רבה! המספר התקבל בהצלחה. לינה תחזור אליך בהקדם."
+    )
+
+async def check_for_lead_in_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """ בודק אם המשתמש הקליד מספר טלפון ידנית בטקסט """
     user_text = update.message.text
     user_name = update.effective_user.first_name
     username = update.effective_user.username
     
-    # זיהוי מספר טלפון (Regex)
+    # חיפוש טלפון בטקסט
     phone_pattern = re.compile(r'\b0?5[0-9]{8}\b') 
     clean_text = user_text.replace("-", "").replace(" ", "")
+    match = phone_pattern.search(clean_text)
     
-    if phone_pattern.search(clean_text):
-        print("📞 זוהה ליד! שולח לערוץ...")
-        
-        alert_text = (
-            f"🔔 <b>ליד חדש התקבל!</b>\n"
-            f"➖➖➖➖➖➖➖\n"
-            f"👤 <b>שם:</b> {user_name}\n"
-            f"🔗 <b>יוזר:</b> @{username if username else 'אין'}\n"
-            f"📱 <b>הודעה:</b>\n"
-            f"<i>{user_text}</i>"
-        )
-        try:
-            await context.bot.send_message(chat_id=TARGET_CHANNEL_ID, text=alert_text, parse_mode='HTML')
-            print(f"✅ נשלח בהצלחה לערוץ {TARGET_CHANNEL_ID}")
-        except Exception as e:
-            print(f"❌ שגיאה בשליחה לערוץ: {e}")
-            print("💡 טיפ: וודא שהבוט הוא Admin בערוץ, ושה-ID מתחיל ב -100")
+    if match:
+        found_phone = match.group(0)
+        print(f"📞 זוהה טלפון בטקסט: {found_phone}")
+        await send_lead_alert(context, user_name, username, found_phone, source_text=user_text)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = update.message.text
     user_id = update.effective_user.id
     
-    # 1. בדיקת ליד
-    await check_for_lead(update, context)
+    # 1. בדיקה אם הוקלד טלפון בתוך הטקסט
+    await check_for_lead_in_text(update, context)
 
-    # 2. ניהול שיחה
+    # 2. ניהול שיחה רגילה
     if user_id not in chats_history:
         chats_history[user_id] = []
 
-    # בניית היסטוריה (6 הודעות אחרונות)
     history_txt = ""
     for msg in chats_history[user_id][-6:]:
         history_txt += f"{msg['role']}: {msg['text']}\n"
 
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action='typing')
     
-    # שליחה לגוגל
     bot_answer = send_to_google_direct(history_txt, user_text)
     
     if not bot_answer:
-        bot_answer = "מצטער, יש כרגע עומס חריג במערכת. אנא נסה שוב בעוד דקה."
+        bot_answer = "מצטער, אני בודק משהו במערכת. תוכל לנסות שוב בעוד רגע?"
 
-    # שמירה ועדכון
     chats_history[user_id].append({"role": "לקוח", "text": user_text})
     chats_history[user_id].append({"role": "אני", "text": bot_answer})
     
@@ -143,25 +151,28 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chats_history[update.effective_user.id] = []
-    welcome_msg = "שלום! אני העוזרת האישית למציאת דירה. איך אני יכולה לעזור לך היום?"
+    welcome_msg = "שלום! אני העוזרת הדיגיטלית של לינה נדל\"ן. איך אפשר לעזור?"
     await context.bot.send_message(chat_id=update.effective_chat.id, text=welcome_msg)
 
 if __name__ == '__main__':
-    # === שלב קריטי: ניקוי ה-Webhook כדי למנוע התנגשויות ===
-    print("🧹 מנקה חיבורים ישנים מול טלגרם...")
+    print("🧹 מנקה חיבורים ישנים...")
     try:
         requests.get(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/deleteWebhook?drop_pending_updates=True")
-        print("✅ הניקוי הושלם.")
-    except Exception as e:
-        print(f"⚠️ שגיאה בניקוי (לא קריטי): {e}")
+    except Exception:
+        pass
 
-    # === הפעלת שרת ה-Keep Alive (עובד ב-Replit וב-Render) ===
     keep_alive()
 
-    # === הפעלת הבוט ===
     application = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+    
+    # --- הוספת המאזינים (Handlers) ---
     application.add_handler(CommandHandler('start', start))
+    
+    # קריטי: מאזין מיוחד לאנשי קשר (Contact)
+    application.add_handler(MessageHandler(filters.CONTACT, handle_contact))
+    
+    # מאזין לטקסט רגיל
     application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
     
-    print(f"🚀 הבוט רץ! (מזהה ערוץ: {TARGET_CHANNEL_ID})")
+    print(f"🚀 הבוט רץ! התראות יישלחו למספר: {ADMIN_ID}")
     application.run_polling()
