@@ -16,20 +16,24 @@ ADMIN_ID = 1687054059
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
 # ==========================================
-# 🧠 הגדרת המוח של גוגל (הספריה הרשמית והיציבה)
+# 🧠 הגדרת המוח של גוגל (הספריה הרשמית)
 # ==========================================
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
     
-    # הגדרות בטיחות למניעת חסימות סתמיות
     safety_settings = [
         {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
         {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
         {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
         {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
     ]
-    # טעינת המודל היציב ביותר (gemini-pro)
-    model = genai.GenerativeModel('gemini-pro', safety_settings=safety_settings)
+    
+    # שימוש במודל gemini-pro היציב
+    model = genai.GenerativeModel(
+        'gemini-pro', 
+        safety_settings=safety_settings,
+        generation_config={"temperature": 0.7, "max_output_tokens": 400}
+    )
 else:
     print("❌ שגיאה: חסר מפתח GEMINI_API_KEY ב-Secrets")
 
@@ -41,77 +45,108 @@ You are Lina, a real estate agent in Netanya.
 Language: Hebrew.
 Traits: Professional, concise, inviting.
 Goal: Get the client's phone number or answer property questions.
-Context: You might be answering in a public group or private chat.
+Keep responses SHORT (max 2-3 sentences).
 """
 
 def ask_google(user_text, history_text):
-    """ פונקציה שמשתמשת בספריה הרשמית של גוגל - הכי יציב שיש """
+    """ פונקציה לשליחה לגוגל עם הגנת Timeout """
     try:
-        # בניית השיחה
         prompt = f"{SYSTEM_PROMPT}\n\nChat History:\n{history_text}\n\nUser: {user_text}\nLina:"
         
-        # שליחה
-        response = model.generate_content(prompt)
-        
-        # החזרת טקסט
+        # הגבלה של 10 שניות כדי שהבוט לא יתקע
+        response = model.generate_content(prompt, request_options={'timeout': 10})
         return response.text
         
     except Exception as e:
-        print(f"💥 Google Error: {e}")
-        return "אני בודקת את הפרטים, אחזור אליך מיד."
+        logging.error(f"💥 Google Error: {e}")
+        return "אני בודקת את הפרטים, אחזור אליך מיד 🏠"
 
 # ==========================================
 # 📩 טיפול בהודעות
 # ==========================================
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # סינונים בסיסיים
     if not update.message or not update.message.text: return
     
-    # התעלמות מהודעות מערכת של הערוץ (ID 777000) - זה מה שבד"כ תוקע בוטים בקבוצות דיון
-    if update.effective_user.id == 777000: return
+    # --- סינון קריטי לערוצים ---
+    # מונע מהבוט לענות לפוסטים של הערוץ עצמו (מונע לופים)
+    if update.effective_user.id == 777000: 
+        return
 
     user_text = update.message.text
-    user_id = update.effective_user.id
-    chat_type = update.effective_chat.type # 'private', 'group', 'supergroup'
+    chat_type = update.effective_chat.type
     
-    print(f"📩 הודעה נכנסה ({chat_type}): {user_text}")
+    logging.info(f"📩 הודעה ({chat_type}): {user_text}")
 
-    # חיווי הקלדה - רק בפרטי! (בקבוצות זה יכול לגרום לשגיאות הרשאה)
+    # חיווי הקלדה (רק בפרטי, כדי לא לשגע את הקבוצה)
     if chat_type == 'private':
         await context.bot.send_chat_action(chat_id=update.effective_chat.id, action='typing')
 
-    # הרצה ברקע (כדי לא לתקוע את הבוט)
+    # קבלת תשובה מגוגל (ברקע)
     loop = asyncio.get_running_loop()
-    # אנחנו לא שולחים היסטוריה ארוכה כרגע כדי לוודא יציבות מקסימלית
-    bot_answer = await loop.run_in_executor(None, ask_google, user_text, "")
+    
+    # ניהול זיכרון חכם (שימוש ב-chat_data)
+    if 'chat_history' not in context.chat_data:
+        context.chat_data['chat_history'] = []
+    
+    # לוקחים רק את 3 ההודעות האחרונות להיסטוריה
+    recent_history = "\n".join(context.chat_data['chat_history'][-3:])
+    
+    try:
+        bot_answer = await loop.run_in_executor(None, ask_google, user_text, recent_history)
+    except Exception as e:
+        logging.error(f"שגיאה כללית: {e}")
+        bot_answer = "סליחה, יש לי תקלה רגעית."
 
-    # שליחה לטלגרם - הפרדה בין פרטי לקבוצה
+    # עדכון ההיסטוריה
+    context.chat_data['chat_history'].append(f"User: {user_text}")
+    context.chat_data['chat_history'].append(f"Lina: {bot_answer}")
+    
+    # שמירה על זיכרון קצר (עד 10 שורות)
+    if len(context.chat_data['chat_history']) > 10:
+        context.chat_data['chat_history'] = context.chat_data['chat_history'][-10:]
+
+    # שליחה לטלגרם
     try:
         if chat_type == 'private':
-            # בפרטי: שולחים עם כפתור
             await update.message.reply_text(bot_answer, reply_markup=get_main_keyboard())
         else:
-            # בקבוצה: שולחים כ"ציטוט" (Reply) בלי כפתור (כפתורים עושים בעיות בקבוצות לפעמים)
+            # בקבוצה - תמיד עם "Reply" (ציטוט)
             await update.message.reply_text(bot_answer, quote=True)
             
     except Exception as e:
-        print(f"Error sending to Telegram: {e}")
-        # ניסיון אחרון לשלוח טקסט נקי
-        await update.message.reply_text(bot_answer)
+        logging.error(f"שגיאה בשליחה: {e}")
 
 # ==========================================
-# 🎮 פקודות בסיסיות
+# 🎮 פקודות ותפריטים
 # ==========================================
 def get_main_keyboard():
-    return ReplyKeyboardMarkup([[KeyboardButton("📞 שלח מספר טלפון", request_contact=True)]], resize_keyboard=True)
+    return ReplyKeyboardMarkup(
+        [[KeyboardButton("📞 שלח מספר טלפון", request_contact=True)]], 
+        resize_keyboard=True
+    )
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("היי! אני לינה נדל\"ן 🏠", reply_markup=get_main_keyboard())
+    welcome_msg = "היי! 👋 אני לינה, סוכנת נדל\"ן בנתניה 🏠\n\nאשמח לעזור לך למצוא את הנכס המושלם!"
+    await update.message.reply_text(welcome_msg, reply_markup=get_main_keyboard())
 
 async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
     c = update.message.contact
-    await context.bot.send_message(ADMIN_ID, f"🔔 ליד: {c.phone_number} - {update.effective_user.first_name}")
-    await update.message.reply_text("תודה! המספר התקבל.", reply_markup=get_main_keyboard())
+    user_name = update.effective_user.first_name or "לקוח"
+    
+    # שליחה לאדמין
+    try:
+        await context.bot.send_message(
+            ADMIN_ID, 
+            f"🔔 ליד חדש!\n👤 {user_name}\n📞 {c.phone_number}"
+        )
+    except: pass
+    
+    await update.message.reply_text(
+        "תודה רבה! 🙏\nקיבלתי את הפרטים ואחזור אליך בהקדם.",
+        reply_markup=get_main_keyboard()
+    )
 
 # ==========================================
 # 🚀 הרצה
@@ -127,5 +162,5 @@ if __name__ == '__main__':
         app.add_handler(MessageHandler(filters.CONTACT, handle_contact))
         app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
         
-        print("✅ הבוט רץ! (ספריה רשמית + טיפול בקבוצות)")
+        print("✅ הבוט רץ! (גרסה סופית ויציבה)")
         app.run_polling()
