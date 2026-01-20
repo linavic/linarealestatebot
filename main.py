@@ -1,7 +1,7 @@
 import os
 import logging
+import requests
 import asyncio
-import google.generativeai as genai
 from telegram import Update, KeyboardButton, ReplyKeyboardMarkup
 from telegram.constants import ChatAction, ChatType
 from telegram.ext import (
@@ -22,59 +22,42 @@ ADMIN_ID = 1687054059
 
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 
-# ==========================================
-# 🧠 הגדרת גוגל ("הצייד" - מנסה הכל)
-# ==========================================
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
-else:
-    print("❌ שגיאה: חסר מפתח גוגל")
-
-SYSTEM_PROMPT = "את Lina, סוכנת נדל\"ן בנתניה. עני בעברית, קצר (עד 2 משפטים) ומקצועי. המטרה: לקבל טלפון."
-
-def ask_gemini_smart(text):
-    """ מנסה מספר מודלים עד שאחד מצליח """
-    
-    # רשימת המודלים מהחדש לישן
-    # הבוט ינסה אותם אחד אחד
-    models_to_try = [
-        "gemini-1.5-flash", # הכי מהיר
-        "gemini-pro",       # הכי יציב (הישן)
-        "gemini-1.5-pro"    # הכי חכם (וכבד)
-    ]
-    
-    last_error = ""
-    
-    for model_name in models_to_try:
-        try:
-            model = genai.GenerativeModel(model_name)
-            # Timeout של 30 שניות כדי למנוע שגיאת 504
-            response = model.generate_content(
-                f"{SYSTEM_PROMPT}\nUser: {text}", 
-                request_options={'timeout': 30}
-            )
-            
-            if response.text:
-                return response.text.strip()
-                
-        except Exception as e:
-            # אם נכשל, שומר את השגיאה ועובר למודל הבא ברשימה
-            last_error = str(e)
-            print(f"⚠️ מודל {model_name} נכשל, עובר לבא...")
-            continue
-            
-    # אם כל המודלים נכשלו
-    print(f"❌ שגיאה סופית: {last_error}")
-    return "יש לי תקלה טכנית רגעית, אנא נסה שוב מאוחר יותר."
+SYSTEM_PROMPT = "את Lina, סוכנת נדל\"ן בנתניה. עני בעברית, קצר ומקצועי."
 
 # ==========================================
-# 🎮 כפתור שליחת טלפון
+# 🎮 כפתור (קבוע!)
 # ==========================================
 def get_main_keyboard():
     return ReplyKeyboardMarkup(
-        [[KeyboardButton("📞 שלח מספר טלפון ללינה (לחץ כאן)", request_contact=True)]], 
+        [[KeyboardButton("📞 שלח מספר טלפון ללינה", request_contact=True)]], 
         resize_keyboard=True
     )
+
+# ==========================================
+# 🧠 חיבור לגוגל (עם הצגת שגיאות אמיתיות)
+# ==========================================
+def ask_gemini_raw(text):
+    # מנסים את המודל הכי סטנדרטי שיש כרגע
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+    
+    headers = {'Content-Type': 'application/json'}
+    payload = {
+        "contents": [{"parts": [{"text": f"{SYSTEM_PROMPT}\nUser: {text}"}]}]
+    }
+    
+    try:
+        # זמן המתנה ארוך (40 שניות) למניעת ניתוקים
+        response = requests.post(url, json=payload, headers=headers, timeout=40)
+        
+        if response.status_code == 200:
+            # הצלחה!
+            return response.json()['candidates'][0]['content']['parts'][0]['text']
+        else:
+            # כישלון - מחזירים את השגיאה האמיתית כדי שנבין מה קורה!
+            return f"⚠️ שגיאת גוגל ({response.status_code}):\n{response.text}"
+            
+    except Exception as e:
+        return f"⚠️ שגיאת חיבור:\n{str(e)}"
 
 # ==========================================
 # 📩 טיפול בהודעות
@@ -105,19 +88,24 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # שליחה לגוגל
     loop = asyncio.get_running_loop()
     try:
-        answer = await loop.run_in_executor(None, ask_gemini_smart, text)
+        answer = await loop.run_in_executor(None, ask_gemini_raw, text)
         
-        if chat_type == 'private':
-            # שולח הודעה + מוודא שהכפתור מופיע
-            await update.message.reply_text(answer, reply_markup=get_main_keyboard())
+        # בודקים אם חזרה שגיאה טכנית
+        if "שגיאת גוגל" in answer or "שגיאת חיבור" in answer:
+            # שולחים את השגיאה כפי שהיא (כדי שתראי אותה)
+            await update.message.reply_text(answer)
         else:
-            await update.message.reply_text(answer, quote=True)
+            # תשובה תקינה - מוסיפים את הכפתור בפרטי
+            if chat_type == 'private':
+                await update.message.reply_text(answer, reply_markup=get_main_keyboard())
+            else:
+                await update.message.reply_text(answer, quote=True)
             
     except Exception as e:
-        print(f"Error: {e}")
+        logging.error(f"Error: {e}")
 
 # ==========================================
-# 📞 טיפול בליד (טלפון)
+# 📞 טיפול בליד
 # ==========================================
 async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
     contact = update.message.contact
@@ -133,7 +121,7 @@ async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except: pass
 
     await update.message.reply_text(
-        "תודה! קיבלתי את המספר, אחזור אליך בהקדם. 🏠",
+        "תודה! קיבלתי את המספר.",
         reply_markup=get_main_keyboard()
     )
 
@@ -142,13 +130,13 @@ async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ==========================================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "היי! אני לינה 🏠\nבמה אפשר לעזור?",
+        "היי! אני לינה 🏠",
         reply_markup=get_main_keyboard()
     )
 
 if __name__ == "__main__":
     keep_alive()
-
+    
     if not TELEGRAM_BOT_TOKEN:
         print("❌ חסר טוקן")
     else:
@@ -157,6 +145,5 @@ if __name__ == "__main__":
         app.add_handler(MessageHandler(filters.CONTACT, handle_contact))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-        print("🧹 מנקה הודעות ישנות...")
-        app.run_polling(drop_pending_updates=True)
-        print("✅ הבוט מוכן! (מצב מרובה מודלים)")
+        print("✅ הבוט רץ (מצב דיאגנוסטיקה)")
+        app.run_polling()
