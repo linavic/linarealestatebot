@@ -3,162 +3,154 @@ import requests
 import logging
 import re
 import traceback
-import time
+import asyncio
 from telegram import Update, KeyboardButton, ReplyKeyboardMarkup
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
 from keep_alive import keep_alive
 
 # ==========================================
-# 🛑 הגדרות (נא לוודא שהמפתחות מוזנים)
+# ⚙️ הגדרות (נלקח אוטומטית מה-Secrets)
 # ==========================================
 
-# נסי להשאיר את זה ככה אם המפתחות בסביבה, או הדביקי בתוך הגרשיים אם צריך
-GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', "XXX_PASTE_KEY_HERE_XXX")
-TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', "XXX_PASTE_TOKEN_HERE_XXX")
-
+GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
+TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
 ADMIN_ID = 1687054059
 
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+# בדיקה שהמפתחות קיימים (מונע קריסה שקטה)
+if not GEMINI_API_KEY or not TELEGRAM_BOT_TOKEN:
+    print("❌ שגיאה קריטית: המפתחות לא נמצאו ב-Secrets/Environment Variables!")
+    # לא עוצרים את הקוד כדי שתראי את השגיאה, אבל הבוט לא יעבוד בלי זה
+
+logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ==========================================
-# 📝 אישיות הבוט (Lina)
+# 📝 הגדרות בוט
 # ==========================================
 SYSTEM_PROMPT = """
 You are Lina, a real estate expert in Netanya (Lina Real Estate).
-Tone: Professional, polite, short, and helpful.
-Language: Hebrew (unless spoken to in English/Russian).
-Goal: Help clients buy/rent properties in Netanya or get their contact info.
-
-Instructions:
-1. If asked about properties, ask for budget and requirements.
-2. In group chats, keep answers VERY short (1 sentence).
-3. If uncertain, ask to move to WhatsApp or ask for a phone number.
+Language: Hebrew.
+Tone: Professional, short, and helpful.
+Goal: Help clients buy/rent properties or get their phone number.
+Important: If the user provides a phone number, thank them and say you will call.
 """
-
 chats_history = {}
 
 # ==========================================
-# 🧠 המוח - שליחה לגוגל (עם תיקון השגיאה)
+# 🧠 חיבור לגוגל (רץ ברקע)
 # ==========================================
-def send_to_google_direct(history_text, user_text):
-    """ מנסה מספר מודלים עד שאחד מצליח """
+def send_to_google_blocking(history_text, user_text):
+    """ הפונקציה הזו רצה ברקע כדי לא לתקוע את הבוט """
     
-    # רשימת מודלים לניסיון - אם הראשון נכשל (404), הוא יעבור לבא בתור
-    models_to_try = [
-        "gemini-1.5-flash",       # הכי חדש ומהיר
-        "gemini-1.5-flash-001",   # גרסה ספציפית
-        "gemini-1.5-pro",         # חזק יותר
-        "gemini-pro"              # הישן והכי יציב (פאלבק אחרון)
-    ]
+    # רשימת מודלים לגיבוי
+    models = ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-1.0-pro"]
     
     headers = {'Content-Type': 'application/json'}
     payload = {
         "contents": [{
-            "parts": [{"text": f"{SYSTEM_PROMPT}\n\nהיסטוריה:\n{history_text}\nלקוח: {user_text}\nאני:"}]
+            "parts": [{"text": f"{SYSTEM_PROMPT}\n\nHistory:\n{history_text}\nUser: {user_text}\nAgent:"}]
         }]
     }
 
     last_error = ""
 
-    for model in models_to_try:
-        # שימי לב: שינינו ל-v1beta ולפעמים v1, אבל נשמור על אחידות כרגע
+    for model in models:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_API_KEY}"
-        
         try:
-            response = requests.post(url, json=payload, headers=headers)
+            # timeout=10 מונע מהבוט לחכות לנצח
+            response = requests.post(url, json=payload, headers=headers, timeout=10)
             
             if response.status_code == 200:
-                # הצלחה!
-                return response.json()['candidates'][0]['content']['parts'][0]['text']
+                try:
+                    return response.json()['candidates'][0]['content']['parts'][0]['text']
+                except KeyError:
+                    continue 
             else:
-                # כישלון במודל הזה, ננסה את הבא
-                last_error = f"Error {model}: {response.text[:100]}"
-                print(f"⚠️ {model} נכשל ({response.status_code}), מנסה את הבא...")
+                print(f"⚠️ מודל {model} נכשל, עובר למודל הבא...")
+                last_error = response.text[:100]
                 continue
 
         except Exception as e:
             last_error = str(e)
             continue
 
-    # אם יצאנו מהלולאה וכלום לא עבד:
-    return f"⚠️ תקלה טכנית: לא ניתן להתחבר למוח כרגע. ({last_error})"
+    print(f"❌ שגיאה סופית בגוגל: {last_error}")
+    return "סליחה, יש לי תקלה רגעית בתקשורת. אנא נסה שוב בעוד דקה."
 
 # ==========================================
 # 📩 טיפול בהודעות
 # ==========================================
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # סינונים
-    if not update.message or not update.message.text: return
-    if update.effective_user.id == 777000: return # מתעלם מהודעות אוטומטיות של הערוץ
-
-    user_text = update.message.text
-    chat_type = update.effective_chat.type
-    
-    # 1. זיהוי טלפון (עובד מעולה לפי הצילום מסך שלך!)
-    phone_pattern = re.compile(r'05\d{1}[- ]?\d{3}[- ]?\d{4}')
-    match = phone_pattern.search(user_text)
-    
-    if match:
-        phone = match.group(0)
-        # שליחת ליד למנהל
-        try:
-            await context.bot.send_message(
-                chat_id=ADMIN_ID, 
-                text=f"🔔 **ליד חדש!**\n📱 `{phone}`\nמקור: {chat_type}\nטקסט: {user_text}",
-                parse_mode='Markdown'
-            )
-        except:
-            pass
-        
-        # תגובה ללקוח
-        await update.message.reply_text("תודה! המספר התקבל, לינה תחזור אליך.")
-        # ממשיכים ל-AI רק אם יש עוד טקסט, או שאפשר לעצור פה. נמשיך ליתר ביטחון.
-
-    # 2. הכנה ל-AI
-    if chat_type == 'private':
-        await context.bot.send_chat_action(chat_id=update.effective_chat.id, action='typing')
-    
-    # ניהול היסטוריה
-    user_id = update.effective_user.id
-    if user_id not in chats_history: chats_history[user_id] = []
-    
-    history = ""
-    for msg in chats_history[user_id][-3:]:
-        history += f"{msg['role']}: {msg['text']}\n"
-
-    # 3. שליחה לגוגל (עם הפונקציה החדשה שמחליפה מודלים לבד)
-    bot_answer = send_to_google_direct(history, user_text)
-
-    # שמירה בהיסטוריה
-    chats_history[user_id].append({"role": "user", "text": user_text})
-    chats_history[user_id].append({"role": "model", "text": bot_answer})
-
-    # 4. שליחת התשובה
     try:
-        # אם התשובה היא הודעת שגיאה (מתחילה ב-⚠️), נשלח אותה רק למנהל, וללקוח הודעה יפה
-        if bot_answer.startswith("⚠️"):
-             await context.bot.send_message(chat_id=ADMIN_ID, text=f"🚨 שגיאת מערכת:\n{bot_answer}")
-             bot_answer = "אני בודקת את זה רגע, תוכל לכתוב לי בווטסאפ בינתיים?"
+        # 1. סינון הודעות
+        if not update.message or not update.message.text: return
+        # מתעלם מהודעות של הערוץ עצמו
+        if update.effective_user.id == 777000: return
 
-        # שליחה ללקוח
+        user_text = update.message.text
+        user_id = update.effective_user.id
+        chat_type = update.effective_chat.type
+        
+        print(f"📩 הודעה חדשה ({chat_type}): {user_text}")
+
+        # 2. זיהוי מספר טלפון
+        phone_pattern = re.compile(r'05\d{1}[- ]?\d{3}[- ]?\d{4}')
+        match = phone_pattern.search(user_text)
+        if match:
+            phone = match.group(0)
+            try:
+                await context.bot.send_message(ADMIN_ID, f"🔔 **ליד חדש!**\n📱 `{phone}`\n💬 {user_text}", parse_mode='Markdown')
+            except:
+                pass 
+            
+            await update.message.reply_text("תודה! רשמתי את המספר, לינה תחזור אליך.")
+            # ממשיכים ל-AI
+
+        # 3. חיווי הקלדה
         if chat_type == 'private':
-             await update.message.reply_text(bot_answer, reply_markup=get_main_keyboard())
-        else:
-             await update.message.reply_text(bot_answer, quote=True)
+            await context.bot.send_chat_action(chat_id=update.effective_chat.id, action='typing')
+
+        # 4. ניהול היסטוריה
+        if user_id not in chats_history: chats_history[user_id] = []
+        history = ""
+        for msg in chats_history[user_id][-3:]:
+            history += f"{msg['role']}: {msg['text']}\n"
+
+        # 5. שליחה לגוגל בצורה אסינכרונית (מונע תקיעות!)
+        # זה התיקון הקריטי: אנחנו מריצים את הבקשה בנפרד מהבוט
+        loop = asyncio.get_running_loop()
+        bot_answer = await loop.run_in_executor(None, send_to_google_blocking, history, user_text)
+
+        # 6. שליחת התשובה
+        chats_history[user_id].append({"role": "user", "text": user_text})
+        chats_history[user_id].append({"role": "model", "text": bot_answer})
+
+        try:
+            if chat_type == 'private':
+                 await update.message.reply_text(bot_answer, reply_markup=get_main_keyboard())
+            else:
+                 # בקבוצה - מגיב בציטוט
+                 await update.message.reply_text(bot_answer, quote=True)
+        except Exception as e:
+            print(f"❌ שגיאה בשליחה לטלגרם: {e}")
+            await update.message.reply_text(bot_answer) # נסיון שני רגיל
 
     except Exception as e:
-        print(f"Error sending to Telegram: {e}")
+        print(f"💥 קריסה בקוד: {e}")
+        traceback.print_exc()
 
 def get_main_keyboard():
-    button = KeyboardButton("📞 שלח את המספר שלי ללינה", request_contact=True)
-    return ReplyKeyboardMarkup([[button]], resize_keyboard=True, one_time_keyboard=False)
+    btn = KeyboardButton("📞 שלח מספר טלפון", request_contact=True)
+    return ReplyKeyboardMarkup([[btn]], resize_keyboard=True)
 
 async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
     c = update.message.contact
-    await context.bot.send_message(chat_id=ADMIN_ID, text=f"🔔 **ליד מכפתור!**\n📱 `{c.phone_number}`\nשם: {update.effective_user.first_name}", parse_mode='Markdown')
-    await update.message.reply_text("תודה! המספר נשמר.", reply_markup=get_main_keyboard())
+    await context.bot.send_message(ADMIN_ID, f"🔔 ליד מכפתור: {c.phone_number} ({update.effective_user.first_name})")
+    await update.message.reply_text("תודה! המספר התקבל.", reply_markup=get_main_keyboard())
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("היי! אני לינה.", reply_markup=get_main_keyboard())
 
 # ==========================================
 # 🚀 הרצה
@@ -166,18 +158,20 @@ async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
 if __name__ == '__main__':
     keep_alive()
     
-    if "XXX_" in TELEGRAM_BOT_TOKEN:
-        print("❌ נא להגדיר טוקן!")
-    else:
+    # מנקה וובהוקים ישנים
+    if TELEGRAM_BOT_TOKEN:
         try:
             requests.get(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/deleteWebhook?drop_pending_updates=True")
-        except:
-            pass
+        except: pass
 
+    if not TELEGRAM_BOT_TOKEN or not GEMINI_API_KEY:
+         print("\n🔴 שגיאה: המפתחות חסרים ב-Secrets! הבוט לא יעבוד. 🔴\n")
+    else:
         app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
-        app.add_handler(CommandHandler('start', lambda u,c: u.message.reply_text("היי! אני הבוט של לינה.", reply_markup=get_main_keyboard())))
+        
+        app.add_handler(CommandHandler('start', start))
         app.add_handler(MessageHandler(filters.CONTACT, handle_contact))
         app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
         
-        print("✅ הבוט רץ (גרסה מתוקנת עם גיבוי מודלים)")
+        print("✅ הבוט רץ! (מושך מפתחות מ-Secrets)")
         app.run_polling()
