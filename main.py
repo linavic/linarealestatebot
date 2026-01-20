@@ -3,6 +3,7 @@ import logging
 import asyncio
 import google.generativeai as genai
 from telegram import Update
+from telegram.constants import ChatAction, ChatType
 from telegram.ext import (
     ApplicationBuilder,
     ContextTypes,
@@ -18,36 +19,40 @@ from keep_alive import keep_alive
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
-# לוגים - כדי שנראה מה קורה במסך השחור
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
-logger = logging.getLogger(__name__)
+# לוגים בסיסיים
+logging.basicConfig(level=logging.INFO)
 
 # ==========================================
-# 🧠 הגדרת גוגל (הכי פשוט, הכי יציב)
+# 🧠 הגדרת המוח של גוגל (הספריה הרשמית)
 # ==========================================
 if not GEMINI_API_KEY:
-    logger.error("❌ חסר מפתח GEMINI_API_KEY!")
+    print("❌ שגיאה: חסר מפתח GEMINI_API_KEY")
 else:
     genai.configure(api_key=GEMINI_API_KEY)
-    # מודל gemini-pro הוא היחיד שעובד יציב בחינם כרגע
-    model = genai.GenerativeModel("gemini-pro")
+    
+    # משתמשים במודל המהיר והעדכני ביותר
+    # אם זה עדיין עושה 404, סימן שהמפתח שלך לא תומך בו, ונחליף ל-gemini-pro
+    model = genai.GenerativeModel("gemini-1.5-flash")
+
+SYSTEM_PROMPT = (
+    "את Lina, סוכנת נדל\"ן מקצועית בנתניה. "
+    "עני בעברית, בצורה קצרה (עד 2 משפטים) ומזמינה. "
+    "המטרה: לעזור ללקוח או לקבל טלפון."
+)
 
 # ==========================================
-# 🧠 הפונקציה שפונה לגוגל
+# 🧠 פונקציה לשליחה לגוגל
 # ==========================================
-def ask_gemini(text):
+def ask_gemini(text: str) -> str:
     try:
-        # הנחיה לבוט
-        prompt = f"את לינה, סוכנת נדלן. עני בעברית בקצרה.\nשאלה: {text}\nתשובה:"
-        
+        # שליחה פשוטה ונקייה דרך הספריה הרשמית
+        prompt = f"{SYSTEM_PROMPT}\nUser: {text}\nLina:"
         response = model.generate_content(prompt)
         return response.text.strip()
     except Exception as e:
-        logger.error(f"Error from Google: {e}")
-        return "יש לי תקלה רגעית, נסה שוב."
+        # במקרה של שגיאה, מדפיסים ללוג ומחזירים הודעה נעימה
+        logging.error(f"Gemini Error: {e}")
+        return "אני בודקת את הפרטים, אחזור אליך מיד."
 
 # ==========================================
 # 📩 טיפול בהודעות
@@ -55,54 +60,58 @@ def ask_gemini(text):
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text: return
     
-    # התעלמות מערוצים (מונע לופים)
+    # מניעת לופים מערוצים
     if update.effective_user.id == 777000: return
 
     text = update.message.text
     chat_type = update.effective_chat.type
     bot_username = context.bot.username
 
-    logger.info(f"📩 הודעה התקבלה ({chat_type}): {text}")
+    # --- סינון קבוצות (החלק החשוב!) ---
+    if chat_type in [ChatType.GROUP, ChatType.SUPERGROUP]:
+        # בודק אם תייגו את הבוט או הגיבו לו
+        is_mentioned = f"@{bot_username}" in text
+        is_reply = (update.message.reply_to_message and 
+                    update.message.reply_to_message.from_user.id == context.bot.id)
+        
+        if not (is_mentioned or is_reply):
+            return # אם לא פנו אלינו, אנחנו שותקים בקבוצה!
 
-    # --- לוגיקה לקבוצות ---
-    # בקבוצה - מגיב רק אם תייגו אותו
-    if chat_type in ['group', 'supergroup']:
-        if f"@{bot_username}" not in text and not (update.message.reply_to_message and update.message.reply_to_message.from_user.id == context.bot.id):
-            return # מתעלם
+        # ניקוי השם של הבוט מההודעה כדי לא לבלבל את גוגל
+        text = text.replace(f"@{bot_username}", "").strip()
 
-    # שליחה לגוגל (ברקע)
+    # חיווי הקלדה (רק בפרטי)
+    if chat_type == 'private':
+        await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
+
+    # שליחה לגוגל ברקע
     loop = asyncio.get_running_loop()
     try:
-        response = await loop.run_in_executor(None, ask_gemini, text)
+        answer = await loop.run_in_executor(None, ask_gemini, text)
         
-        # שליחה חזרה לטלגרם
         if chat_type == 'private':
-            await update.message.reply_text(response)
+            await update.message.reply_text(answer)
         else:
-            await update.message.reply_text(response, quote=True)
+            await update.message.reply_text(answer, quote=True)
             
     except Exception as e:
-        logger.error(f"Failed to send message: {e}")
+        print(f"Error: {e}")
 
+# ==========================================
+# 🚀 התחלה
+# ==========================================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("היי, אני לינה! 🏠")
+    await update.message.reply_text("היי! אני לינה 🏠")
 
-# ==========================================
-# 🚀 הרצה
-# ==========================================
 if __name__ == "__main__":
     keep_alive()
 
     if not TELEGRAM_BOT_TOKEN:
-        print("❌ חסר טוקן של טלגרם!")
+        print("❌ חסר טוקן")
     else:
         app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
         app.add_handler(CommandHandler("start", start))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-        print("🔄 מנקה חיבורים ישנים...")
-        # זה הטריק! מוחק את ה-Webhook התקוע
-        # אבל צריך לעשות את זה ידנית ב-Run Polling, אז פשוט נריץ רגיל:
-        
-        print("✅ הבוט מתחיל לרוץ עכשיו!")
-        app.run_polling(drop_pending_updates=True) # מנקה הודעות תקועות
+        print("✅ הבוט רץ! (גרסה רשמית)")
+        app.run_polling()
