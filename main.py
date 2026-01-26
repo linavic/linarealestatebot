@@ -1,82 +1,82 @@
 import os
 import logging
 import threading
-import sys
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import google.generativeai as genai
 import requests
 
-# הגדרת לוגים שתופיע מיד
 logging.basicConfig(level=logging.INFO)
 
 app = Flask(__name__)
 CORS(app)
 
-# === קבלת מפתחות עם ניקוי רווחים (טעות נפוצה) ===
+# === קבלת מפתחות ===
 def get_key(name):
     val = os.environ.get(name)
-    if val:
-        return val.strip()
-    return None
+    return val.strip() if val else None
 
 GENAI_API_KEY = get_key("GEMINI_API_KEY")
 TELEGRAM_TOKEN = get_key("TELEGRAM_TOKEN")
 ADMIN_ID = get_key("ADMIN_ID")
 
-# === בדיקת חיבור ל-Gemini ===
+# === חיבור למוח (Gemini) ===
 model = None
-gemini_status = "Not Connected"
-
 if GENAI_API_KEY:
     try:
         genai.configure(api_key=GENAI_API_KEY)
-        model = genai.GenerativeModel("gemini-1.5-flash")
-        gemini_status = "Connected ✅"
+        # שינוי קריטי: שימוש במודל gemini-pro היציב
+        model = genai.GenerativeModel("gemini-pro")
+        print("✅ Gemini PRO Connected")
     except Exception as e:
-        gemini_status = f"Error: {str(e)}"
-else:
-    gemini_status = "Missing API Key ❌"
+        print(f"❌ Gemini Error: {e}")
 
-# פונקציית שליחה לטלגרם (מוגנת מקריסות)
-def send_telegram_safe(text):
+chat_sessions = {}
+
+# פונקציית שליחה לטלגרם (בלי לתקוע את האתר)
+def send_telegram_background(text):
     if not TELEGRAM_TOKEN or not ADMIN_ID: return
     try:
         requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", 
-                      json={"chat_id": ADMIN_ID, "text": text}, timeout=3)
+                      json={"chat_id": ADMIN_ID, "text": text}, timeout=4)
     except: pass
 
 @app.route('/')
 def home():
-    return f"Status: {gemini_status}"
+    return "Lina Bot is Ready! 🚀"
 
 @app.route('/web-chat', methods=['POST'])
 def web_chat():
     try:
-        # בדיקה 1: האם יש מפתח?
-        if not GENAI_API_KEY:
-            return jsonify({'reply': "🔴 שגיאה: חסר מפתח GEMINI_API_KEY בהגדרות השרת (Environment)."})
-        
-        # בדיקה 2: האם המודל נטען?
         if not model:
-            return jsonify({'reply': f"🔴 שגיאה בחיבור לגוגל: {gemini_status}"})
+            return jsonify({'reply': "שגיאת מערכת: המוח לא מחובר."})
 
         data = request.json
         user_msg = data.get('message')
-        
-        # בדיקה 3: שליחה לטלגרם (בלי לתקוע)
-        threading.Thread(target=send_telegram_safe, args=(f"לקוח: {user_msg}",)).start()
+        user_id = data.get('user_id', 'guest')
 
-        # בדיקה 4: שליחה למודל (כאן זה בדרך כלל נופל)
-        response = model.generate_content(user_msg)
+        # 1. שליחת התראה ללינה ברקע
+        threading.Thread(target=send_telegram_background, args=(f"👤 *לקוח:* {user_msg}",)).start()
+
+        # 2. ניהול שיחה
+        if user_id not in chat_sessions:
+            chat_sessions[user_id] = model.start_chat(history=[])
+            # הנחיה לבוט בכל תחילת שיחה
+            chat_sessions[user_id].send_message(
+                "אתה העוזר של לינה (LINA Real Estate). ענה בעברית קצרה, נחמדה ומכירתית. נסה להשיג טלפון."
+            )
+            threading.Thread(target=send_telegram_background, args=(f"🚀 לקוח חדש נכנס!",)).start()
+
+        # 3. תשובה ללקוח
+        chat = chat_sessions[user_id]
+        response = chat.send_message(user_msg)
         
         return jsonify({'reply': response.text})
 
     except Exception as e:
-        # === זה החלק החשוב: הבוט יגיד לך מה הבעיה ===
-        error_message = str(e)
-        print(f"ERROR: {error_message}")
-        return jsonify({'reply': f"🔴 דוח שגיאה (צלמי מסך):\n{error_message}"})
+        print(f"ERROR: {e}")
+        # הודעה מנומסת ללקוח (התיקון בוצע, לא צריך להפחיד אותם)
+        return jsonify({'reply': "סליחה, אני מתחבר מחדש למערכת. נסה שוב בעוד רגע או התקשר ללינה."})
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
