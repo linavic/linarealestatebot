@@ -1,183 +1,129 @@
 import os
-import requests
 import logging
-import re
-from telegram import Update, KeyboardButton, ReplyKeyboardMarkup
-from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
-from keep_alive import keep_alive
+import asyncio
+import threading
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+import google.generativeai as genai
+import requests
+from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
-# ==========================================
-# ⚙️ הגדרות
-# ==========================================
-GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
-TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
-ADMIN_ID = 1687054059
-
+# === הגדרות לוגים (כדי למנוע עומס) ===
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# ==========================================
-# 🧠 ניהול זיכרון שלבים (State Machine)
-# ==========================================
-# המילון הזה ישמור לכל משתמש באיזה שלב הוא נמצא
-# 0 = התחלה
-# 1 = שאלנו "קניה או השכרה?", מחכים לתשובה
-# 2 = שאלנו "תקציב וחדרים?", מחכים לתשובה
-# 3 = שאלנו "אזור?", מחכים לתשובה
-# 4 = סיימנו, מבקשים רק טלפון
-user_states = {}
-chats_history = {} # שומרים היסטוריה רק בשביל הקונטקסט ל-AI
+# === הגדרות מפתחות ===
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+GENAI_API_KEY = os.environ.get("GEMINI_API_KEY")
+ADMIN_ID = os.environ.get("ADMIN_ID") # המזהה של לינה בטלגרם
 
-# כתובות AI
-current_model_url = ""
+# === הגדרת Gemini AI ===
+if GENAI_API_KEY:
+    genai.configure(api_key=GENAI_API_KEY)
+    model = genai.GenerativeModel(
+        model_name="gemini-1.5-flash",
+        system_instruction="""
+        אתה העוזר האישי החכם של לינה סוחוביצקי (LINA Real Estate).
+        תפקידך: לענות ללקוחות, להיות נחמד, שיווקי ולנסות להשיג לידים (שם וטלפון).
+        הנחיות חשובות:
+        1. ענה בעברית טבעית וקצרה.
+        2. המטרה שלך היא לגרום ללקוח להשאיר טלפון או להתקשר ללינה.
+        3. הטלפון של לינה: 054-4326270.
+        """
+    )
+else:
+    model = None
+    print("Warning: Gemini API Key missing!")
 
-def find_working_model():
-    global current_model_url
-    possible_urls = [
-        f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}",
-        f"https://generativelanguage.googleapis.com/v1/models/gemini-pro:generateContent?key={GEMINI_API_KEY}"
-    ]
-    for url in possible_urls:
-        try:
-            if requests.post(url, json={"contents": [{"parts": [{"text": "."}]}]}, timeout=5).status_code == 200:
-                current_model_url = url
-                return
-        except: continue
-    current_model_url = f"https://generativelanguage.googleapis.com/v1/models/gemini-pro:generateContent?key={GEMINI_API_KEY}"
+chat_sessions = {}
 
-find_working_model()
+# === שרת Flask (עבור האתר) ===
+app = Flask(__name__)
+CORS(app)
 
-# ==========================================
-# 🧠 יצירת תשובה חכמה לפי השלב
-# ==========================================
-def generate_response(user_text, state, history_text):
-    
-    # הנחיות מדויקות ל-AI לפי השלב בו המשתמש נמצא
-    prompt_instruction = ""
-    
-    if state == 1:
-        # המשתמש ענה עכשיו על קניה/השכרה. הבוט צריך לשאול על חדרים ותקציב.
-        prompt_instruction = "The user said Buy/Rent. Reply nicely and ASK: 'How many rooms and what is the budget?'"
-    elif state == 2:
-        # המשתמש ענה על תקציב. הבוט צריך לשאול על אזור.
-        prompt_instruction = "The user gave budget/rooms. Reply nicely and ASK: 'Do you have a preferred area in Netanya?'"
-    elif state == 3:
-        # המשתמש ענה על אזור. הבוט צריך לסיים.
-        prompt_instruction = "The user gave area. Say thank you and that you are checking availability."
-
-    system_prompt = f"""
-    You are the receptionist for Lina Real Estate.
-    Language: Hebrew.
-    Current Goal: {prompt_instruction}
-    Keep it short (1-2 sentences).
-    NEVER ask for a phone number yet.
-    """
-
-    headers = {'Content-Type': 'application/json'}
-    payload = {
-        "contents": [{
-            "parts": [{"text": f"{system_prompt}\n\nהיסטוריה:\n{history_text}\nלקוח: {user_text}\nאני:"}]
-        }]
-    }
-    
+def notify_lina_telegram(text):
+    """שולח התראה ללינה בטלגרם על פעילות באתר"""
+    if not TELEGRAM_TOKEN or not ADMIN_ID:
+        return
     try:
-        response = requests.post(current_model_url, json=payload, headers=headers, timeout=10)
-        if response.status_code == 200:
-            return response.json()['candidates'][0]['content']['parts'][0]['text']
-    except: pass
-    
-    # גיבוי ידני אם ה-AI נכשל (כדי שהרצף לא יישבר)
-    if state == 1: return "מעולה. כמה חדרים אתם מחפשים ומה התקציב בערך?"
-    if state == 2: return "רשמתי. יש אזור מסוים בנתניה שאתם מעדיפים?"
-    return "תודה על הפרטים."
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        requests.post(url, json={"chat_id": ADMIN_ID, "text": f"🌐 *אתר:* {text}", "parse_mode": "Markdown"})
+    except Exception as e:
+        print(f"Failed to notify Lina: {e}")
 
-# ==========================================
-# 📩 לוגיקה ראשית
-# ==========================================
-def get_main_keyboard():
-    return ReplyKeyboardMarkup([[KeyboardButton("📞 לחץ כאן להשארת מספר לסוכן", request_contact=True)]], resize_keyboard=True)
+@app.route('/')
+def index():
+    return "Lina Bot Server is Running!"
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message or not update.message.text: return
-    if update.effective_user.id == 777000: return
+@app.route('/web-chat', methods=['POST'])
+def web_chat():
+    try:
+        data = request.json
+        user_msg = data.get('message')
+        user_id = data.get('user_id', 'guest')
 
-    user_text = update.message.text
-    user_id = update.effective_user.id
-    
-    # 1. בדיקת טלפון (עוקף הכל)
-    phone_pattern = re.compile(r'05\d{1}[- ]?\d{3}[- ]?\d{4}')
-    if phone_pattern.search(user_text):
-        phone = phone_pattern.search(user_text).group(0)
-        await context.bot.send_message(chat_id=ADMIN_ID, text=f"🔔 ליד בטקסט!\n{phone}\n{user_text}")
-        await context.bot.send_message(chat_id=update.effective_chat.id, text="תודה! המספר נשמר ויועבר ללינה. 🏠", reply_markup=get_main_keyboard())
-        # מסיימים את השיחה
-        user_states[user_id] = 4 
-        return
+        # אם זו שיחה חדשה
+        if user_id not in chat_sessions:
+            chat_sessions[user_id] = model.start_chat(history=[])
+            notify_lina_telegram(f"🚀 לקוח חדש התחיל שיחה!\nID: {user_id}")
 
-    # 2. ניהול שלבים (State Machine)
-    # ברירת מחדל: אם המשתמש לא קיים, הוא בשלב 0
-    current_state = user_states.get(user_id, 0)
+        # שליחת התראה ללינה
+        notify_lina_telegram(f"👤 לקוח: {user_msg}")
 
-    # אם המשתמש כבר סיים את התהליך (שלב 4), לא נמשיך לשוחח איתו
-    if current_state >= 4:
-        await context.bot.send_message(chat_id=update.effective_chat.id, text="כדי שנתקדם, אנא לחץ על הכפתור למטה להשארת מספר 👇", reply_markup=get_main_keyboard())
-        return
+        # קבלת תשובה מ-Gemini
+        chat = chat_sessions[user_id]
+        response = chat.send_message(user_msg)
+        bot_reply = response.text
 
-    # קידום השלב!
-    # המשתמש שלח הודעה -> אנחנו מניחים שהוא ענה על השאלה הקודמת -> מתקדמים לשלב הבא
-    next_state = current_state + 1
-    user_states[user_id] = next_state # שומרים את השלב החדש
+        # בדיקה אם הושאר טלפון
+        if any(char.isdigit() for char in user_msg) and len(user_msg) > 6:
+            notify_lina_telegram(f"🔥 **ליד חם! זוהה טלפון:**\n{user_msg}")
 
-    # בדיקה: האם הגענו לסוף? (אחרי שענה על אזור)
-    if next_state == 4:
-        final_msg = (
-            "תודה רבה! יש לי את כל המידע שצריך. 🏠\n"
-            "כדי שסוכן אנושי יחזור אליך עם נכסים רלוונטיים בול למה שביקשת, "
-            "אנא לחץ על הכפתור למטה להשארת נייד."
-        )
-        await context.bot.send_message(chat_id=update.effective_chat.id, text=final_msg, reply_markup=get_main_keyboard())
-        return
+        return jsonify({'reply': bot_reply})
 
-    # הכנת ההיסטוריה ל-AI
-    if user_id not in chats_history: chats_history[user_id] = []
-    history_str = ""
-    for msg in chats_history[user_id][-4:]: history_str += f"{msg['role']}: {msg['text']}\n"
+    except Exception as e:
+        print(f"Error in web_chat: {e}")
+        return jsonify({'reply': "סליחה, יש תקלה רגעית. נסה שוב מאוחר יותר."})
 
-    # חיווי הקלדה
-    if update.effective_chat.type == 'private':
-        await context.bot.send_chat_action(chat_id=update.effective_chat.id, action='typing')
+def run_flask():
+    """מריץ את השרת בפורט ש-Render דורש"""
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port, use_reloader=False)
 
-    # שליחה ל-AI עם השלב *החדש* שאנחנו נמצאים בו
-    # אנחנו שולחים את next_state כי זה השלב שאנחנו רוצים שהבוט *ישאל* עליו עכשיו
-    bot_answer = generate_response(user_text, next_state, history_str)
-
-    # שמירה ועדכון
-    chats_history[user_id].append({"role": "user", "text": user_text})
-    chats_history[user_id].append({"role": "model", "text": bot_answer})
-
-    await context.bot.send_message(chat_id=update.effective_chat.id, text=bot_answer, reply_markup=get_main_keyboard())
-
-async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    c = update.message.contact
-    await context.bot.send_message(chat_id=ADMIN_ID, text=f"🔔 ליד כפתור!\n{c.phone_number}\n{c.first_name}")
-    await context.bot.send_message(chat_id=update.effective_chat.id, text="קיבלתי! סוכן שלנו יחייג אליך בהקדם. 🏠", reply_markup=get_main_keyboard())
-    # נועלים את המשתמש בסוף
-    user_states[update.effective_user.id] = 4
-
+# === בוט טלגרם (פונקציות) ===
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    # איפוס מוחלט להתחלה
-    user_states[user_id] = 0 
-    chats_history[user_id] = []
-    
-    welcome_msg = "שלום, אני הבוט של הסוכנות Lina Real Estate בנתניה 🏠\nבמה אוכל לעזור לך היום? (קנייה או השכרה?)"
-    await context.bot.send_message(chat_id=update.effective_chat.id, text=welcome_msg, reply_markup=get_main_keyboard())
+    await update.message.reply_text("היי! אני הבוט של לינה סוחוביצקי. איך אפשר לעזור?")
 
-if __name__ == '__main__':
-    keep_alive()
-    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
-    app.add_handler(CommandHandler('start', start))
-    app.add_handler(MessageHandler(filters.CONTACT, handle_contact))
-    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
+async def handle_telegram_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """מטפל בהודעות שנשלחות בטלגרם"""
+    user_text = update.message.text
+    chat_id = update.effective_chat.id
     
-    print("✅ הבוט הליניארי רץ (אין חזרות לאחור)")
-    app.run_polling(drop_pending_updates=True)
+    # שימוש ב-Gemini גם לטלגרם
+    try:
+        response = model.generate_content(user_text)
+        await update.message.reply_text(response.text)
+    except:
+        await update.message.reply_text("קיבלתי את ההודעה, מעביר ללינה.")
+
+# === הפעלה ראשית ===
+if __name__ == "__main__":
+    # 1. הפעלת שרת האתר (Flask) ב-Thread נפרד כדי לא לחסום את הטלגרם
+    flask_thread = threading.Thread(target=run_flask)
+    flask_thread.daemon = True
+    flask_thread.start()
+
+    # 2. הפעלת בוט הטלגרם (Polling)
+    if TELEGRAM_TOKEN:
+        print("Starting Telegram Bot...")
+        application = Application.builder().token(TELEGRAM_TOKEN).build()
+        application.add_handler(CommandHandler("start", start))
+        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_telegram_message))
+        
+        # הרצה
+        application.run_polling(allowed_updates=Update.ALL_TYPES)
+    else:
+        print("No Telegram Token found. Only Web Server running.")
+        # אם אין טוקן, משאירים את הסקריפט חי עבור השרת
+        flask_thread.join()
