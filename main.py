@@ -9,7 +9,7 @@ logging.basicConfig(level=logging.INFO)
 app = Flask(__name__)
 CORS(app)
 
-# קבלת מפתחות
+# ניקוי מפתחות
 def get_key(name):
     val = os.environ.get(name)
     return val.strip() if val else None
@@ -18,18 +18,36 @@ API_KEY = get_key("GEMINI_API_KEY")
 TELEGRAM_TOKEN = get_key("TELEGRAM_TOKEN")
 ADMIN_ID = get_key("ADMIN_ID")
 
-# === רשימת המודלים לניסיון (מפתח מאסטר) ===
-# הבוט ינסה אותם לפי הסדר עד שאחד יעבוד
-MODELS_TO_TRY = [
-    "gemini-1.5-flash",
-    "gemini-1.5-pro",
-    "gemini-1.0-pro",
-    "gemini-pro"
-]
-
 chat_history = {}
+CURRENT_MODEL_NAME = None # כאן נשמור את השם שהבוט ימצא לבד
 
-# פונקציית התראה לטלגרם
+# === פונקציית הקסם: מציאת מודל אוטומטית ===
+def find_working_model():
+    global CURRENT_MODEL_NAME
+    if CURRENT_MODEL_NAME: return CURRENT_MODEL_NAME
+    
+    print("🔍 Scanning for available Google models...")
+    try:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models?key={API_KEY}"
+        response = requests.get(url, timeout=5)
+        
+        if response.status_code == 200:
+            data = response.json()
+            # מחפשים מודל שיודע לייצר טקסט
+            for model in data.get('models', []):
+                if 'generateContent' in model.get('supportedGenerationMethods', []):
+                    # מצאנו! שומרים את השם המדויק (למשל models/gemini-1.5-flash-001)
+                    CURRENT_MODEL_NAME = model['name']
+                    print(f"✅ Auto-detected model: {CURRENT_MODEL_NAME}")
+                    return CURRENT_MODEL_NAME
+    except Exception as e:
+        print(f"⚠️ Auto-detect failed: {e}")
+    
+    # ברירת מחדל אם הסריקה נכשלה
+    print("⚠️ Using fallback model")
+    return "models/gemini-1.5-flash"
+
+# === התראות לטלגרם ===
 def notify_lina(text):
     if not TELEGRAM_TOKEN or not ADMIN_ID: return
     try:
@@ -37,59 +55,10 @@ def notify_lina(text):
                       json={"chat_id": ADMIN_ID, "text": text}, timeout=3)
     except: pass
 
-# === הפונקציה החכמה שמנסה הכל ===
-def ask_google_bulletproof(user_id, message):
-    # ניהול היסטוריה
-    history = chat_history.get(user_id, [])
-    history.append({"role": "user", "parts": [{"text": message}]})
-    
-    # הוספת הנחיה
-    current_prompt = {
-        "contents": history,
-        "systemInstruction": {
-            "parts": [{"text": "אתה העוזר של לינה (LINA Real Estate). ענה בעברית קצרה, נחמדה ומכירתית."}]
-        }
-    }
-
-    last_error = ""
-
-    # === הלב של הבוט: לולאת הניסיונות ===
-    for model_name in MODELS_TO_TRY:
-        try:
-            # בניית כתובת דינמית לכל מודל
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={API_KEY}"
-            
-            # ניסיון שליחה
-            response = requests.post(url, json=current_prompt, headers={'Content-Type': 'application/json'}, timeout=8)
-            
-            if response.status_code == 200:
-                # הצלחה!
-                result = response.json()
-                if 'candidates' in result and result['candidates']:
-                    bot_text = result['candidates'][0]['content']['parts'][0]['text']
-                    
-                    # שמירה בהיסטוריה
-                    history.append({"role": "model", "parts": [{"text": bot_text}]})
-                    chat_history[user_id] = history[-10:]
-                    
-                    # הצלחנו, יוצאים מהלולאה ומחזירים תשובה
-                    return bot_text
-            else:
-                # שגיאה במודל הזה, שומרים אותה וממשיכים לבא בתור
-                last_error = f"Model {model_name} failed: {response.text}"
-                print(f"⚠️ {model_name} failed, trying next...")
-                
-        except Exception as e:
-            last_error = f"Network error on {model_name}: {str(e)}"
-
-    # אם כל המודלים נכשלו
-    print(f"❌ ALL MODELS FAILED. Last Error: {last_error}")
-    return f"תקלה בחיבור לגוגל. שגיאה: {last_error}"
-
 # === השרת ===
 @app.route('/')
 def home():
-    return "Lina Master-Bot Active 🚀"
+    return "Lina Auto-Bot Active 🚀"
 
 @app.route('/web-chat', methods=['POST'])
 def web_chat():
@@ -107,13 +76,43 @@ def web_chat():
         if any(char.isdigit() for char in msg) and len(msg) > 6:
             threading.Thread(target=notify_lina, args=(f"🔥 **ליד חם!**\n{msg}",)).start()
 
-        # קבלת תשובה
-        reply = ask_google_bulletproof(uid, msg)
+        # 1. מציאת המודל הנכון (רק בפעם הראשונה)
+        model_name = find_working_model()
         
-        return jsonify({'reply': reply})
+        # 2. ניהול שיחה
+        history = chat_history.get(uid, [])
+        history.append({"role": "user", "parts": [{"text": msg}]})
+        
+        payload = {
+            "contents": history,
+            "systemInstruction": {
+                "parts": [{"text": "אתה העוזר של לינה (LINA Real Estate). ענה בעברית קצרה ומכירתית."}]
+            }
+        }
+
+        # 3. שליחה לכתובת הדינמית
+        # שים לב: model_name כבר כולל את המילה models/ אז לא מוסיפים אותה שוב
+        url = f"https://generativelanguage.googleapis.com/v1beta/{model_name}:generateContent?key={API_KEY}"
+        
+        response = requests.post(url, json=payload, headers={'Content-Type': 'application/json'}, timeout=10)
+        
+        if response.status_code == 200:
+            result = response.json()
+            if 'candidates' in result and result['candidates']:
+                bot_text = result['candidates'][0]['content']['parts'][0]['text']
+                history.append({"role": "model", "parts": [{"text": bot_text}]})
+                chat_history[uid] = history[-10:] 
+                return jsonify({'reply': bot_text})
+            else:
+                return jsonify({'reply': "לא הבנתי, נסה שוב."})
+        else:
+            # אם גם זה נכשל - זה אומר שהמפתח עצמו חסום או לא תקין
+            error_json = response.json()
+            error_msg = error_json.get('error', {}).get('message', 'Unknown Error')
+            return jsonify({'reply': f"תקלה במפתח: {error_msg}"})
 
     except Exception as e:
-        return jsonify({'reply': "תקלה טכנית בשרת."})
+        return jsonify({'reply': "תקלה טכנית."})
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
