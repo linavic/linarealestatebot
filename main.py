@@ -36,9 +36,9 @@ def get_working_model():
 
         preferred = ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-1.0-pro", "gemini-pro"]
         available_models = [
-            m['name'].replace('models/', '')
-            for m in data.get('models', [])
-            if 'generateContent' in m.get('supportedGenerationMethods', [])
+            m["name"].replace("models/", "")
+            for m in data.get("models", [])
+            if "generateContent" in m.get("supportedGenerationMethods", [])
         ]
 
         for pref in preferred:
@@ -73,37 +73,48 @@ def notify_lina(text):
     except Exception as e:
         logger.exception(f"Failed to send Telegram message: {e}")
 
-@app.route('/')
+@app.route("/")
 def home():
     return "Lina Bot Auto-Fix Active 🚀"
 
-@app.route('/web-chat', methods=['POST'])
+@app.route("/web-chat", methods=["POST"])
 def web_chat():
     try:
         if not API_KEY:
-            return jsonify({'reply': "Server error: missing API key"}), 500
+            return jsonify({"reply": "Server error: missing API key"}), 500
 
         data = request.json or {}
-        msg = data.get('message', '') or ''
-        uid = data.get('user_id', 'guest')
+        msg = data.get("message", "") or ""
+        uid = data.get("user_id", "guest")
 
         logger.info(f"Incoming message from {uid}: {msg}")
 
-        clean_msg = re.sub(r'[s-]', '', msg)
-        # טלפון ישראלי בסיסי: 0 + 8–9 ספרות
-        phone_match = re.search(r'0d{8,9}', clean_msg)
+        # ניקוי והוצאת טלפון
+        clean_msg = re.sub(r"[s-]", "", msg)
+        phone_match = re.search(r"0d{8,9}", clean_msg)
 
         if phone_match:
-            text = f"✅ יש ליד חדש!
-User ID: {uid}
-Message: {msg}
-Phone: {phone_match.group(0)}"
+            text = (
+                f"✅ יש ליד חדש!
+"
+                f"User ID: {uid}
+"
+                f"Message: {msg}
+"
+                f"Phone: {phone_match.group(0)}"
+            )
             threading.Thread(target=notify_lina, args=(text,)).start()
         else:
-            threading.Thread(target=notify_lina, args=(f"💬 {uid}: {msg}",)).start()
+            threading.Thread(
+                target=notify_lina,
+                args=(f"💬 {uid}: {msg}",),
+            ).start()
 
         model_name = get_working_model()
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={API_KEY}"
+        url = (
+            f"https://generativelanguage.googleapis.com/v1beta/models/"
+            f"{model_name}:generateContent?key={API_KEY}"
+        )
 
         history = chat_history.get(uid, [])
         history.append({"role": "user", "parts": [{"text": msg}]})
@@ -124,37 +135,53 @@ Phone: {phone_match.group(0)}"
 
         payload = {"contents": contents}
 
-        resp = requests.post(url, json=payload,
-                             headers={'Content-Type': 'application/json'}, timeout=15)
+        resp = requests.post(
+            url,
+            json=payload,
+            headers={"Content-Type": "application/json"},
+            timeout=15,
+        )
 
         if resp.status_code != 200:
             logger.error(f"Gemini HTTP error {resp.status_code}: {resp.text}")
-            return jsonify({'reply': "אשמח לעזור! אנא השאר שם וטלפון ואחזור אליך בהקדם."})
+            return jsonify(
+                {
+                    "reply": "אשמח לעזור! אנא השאר שם וטלפון ואחזור אליך בהקדם."
+                }
+            )
 
         result = resp.json()
         if "error" in result:
             logger.error(f"Gemini API error: {result['error']}")
-            return jsonify({'reply': "תקלה זמנית במערכת. אפשר לכתוב כאן שם וטלפון ואני אחזור בהקדם."})
+            return jsonify(
+                {
+                    "reply": "תקלה זמנית במערכת. אפשר לכתוב כאן שם וטלפון ואני אחזור בהקדם."
+                }
+            )
 
-        candidates = result.get('candidates', [])
+        candidates = result.get("candidates", [])
         if not candidates:
             logger.warning("No candidates returned from Gemini")
-            return jsonify({'reply': "אשמח לעזור! אנא כתוב/כתבי שם וטלפון."})
+            return jsonify({"reply": "אשמח לעזור! אנא כתוב/כתבי שם וטלפון."})
 
-        bot_text = candidates[0]['content']['parts'][0].get('text', '')
+        bot_text = candidates[0]["content"]["parts"][0].get("text", "")
 
-        bot_text = re.sub(r'thought_.*?(
-|$)', '', bot_text, flags=re.IGNORECASE)
+        bot_text = re.sub(
+            r"thought_.*?(
+|$)", "", bot_text, flags=re.IGNORECASE
+        )
         bot_text = bot_text.replace("Option 1", "").replace("Analysis:", "")
 
         history.append({"role": "model", "parts": [{"text": bot_text}]})
         chat_history[uid] = history[-10:]
 
-        return jsonify({'reply': bot_text})
+        return jsonify({"reply": bot_text})
 
     except Exception as e:
         logger.exception(f"Server Error in /web-chat: {e}")
-        return jsonify({'reply': "תקלה טכנית. נא להשאיר שם וטלפון ואחזור אליך בהקדם."}), 500
+        return jsonify(
+            {"reply": "תקלה טכנית. נא להשאיר שם וטלפון ואחזור אליך בהקדם."}
+        ), 500
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
