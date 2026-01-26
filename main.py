@@ -5,103 +5,128 @@ import logging
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 
-logging.basicConfig(level=logging.INFO)
+# הגדרת logging - כדי שנראה ב-Render מה קורה
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-CORS(app)
+# פתיחת גישה לכל הדומיינים (מונע בעיות CORS)
+CORS(app, resources={r"/*": {"origins": "*"}})
 
+# פונקציה לקריאת משתני סביבה עם ניקוי רווחים
 def get_env(name):
     v = os.environ.get(name)
-    return v.strip() if v else None
+    if v:
+        v = v.strip() # מחיקת רווחים מיותרים
+        logger.info(f"Environment variable {name}: SET")
+    else:
+        logger.warning(f"Environment variable {name}: NOT FOUND")
+    return v
 
+# קריאת משתני סביבה
 API_KEY = get_env("GEMINI_API_KEY")
 TELEGRAM_TOKEN = get_env("TELEGRAM_TOKEN")
 ADMIN_ID = get_env("ADMIN_ID")
 
+# שימוש במודל היציב
 MODEL = "gemini-1.5-flash"
 
 def notify_lina(text):
+    """שליחת התראה לטלגרם"""
     if not TELEGRAM_TOKEN or not ADMIN_ID:
-        return
+        logger.warning("Telegram credentials missing - notification skipped")
+        return False
+    
     try:
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        response = requests.post(
+            url,
             json={
                 "chat_id": ADMIN_ID,
-                "text": text
+                "text": text,
+                "parse_mode": "HTML"
             },
-            timeout=3
+            timeout=5
         )
+        response.raise_for_status()
+        logger.info("Telegram notification sent successfully")
+        return True
     except Exception as e:
-        logging.warning(f"Telegram error: {e}")
+        logger.error(f"Telegram error: {e}")
+        return False
 
 @app.route("/")
 def home():
-    return "Lina Bot Running ✅"
+    """בדיקת תקינות השרת"""
+    return "Lina Bot is Running! 🚀", 200
 
-@app.route("/web-chat", methods=["POST"])
+@app.route("/web-chat", methods=["POST", "OPTIONS"])
 def web_chat():
+    # טיפול ב-CORS preflight
+    if request.method == "OPTIONS":
+        return "", 204
+    
+    # בדיקת API key
     if not API_KEY:
-        return jsonify({"reply": "System error."})
+        logger.error("API_KEY missing")
+        return jsonify({"reply": "תקלה טכנית בשרת (חסר מפתח)."}), 500
 
-    data = request.json or {}
-    msg = data.get("message", "").strip()
+    # קריאת הנתונים
+    try:
+        data = request.get_json(force=True)
+        msg = data.get("message", "").strip()
+    except Exception as e:
+        return jsonify({"reply": "אנא נסי שוב."}), 400
 
     if not msg:
-        return jsonify({"reply": "איך אפשר לעזור?"})
+        return jsonify({"reply": "היי! איך אפשר לעזור לך היום? 😊"}), 200
 
-    # זיהוי טלפון
-    clean = re.sub(r"[^\d]", "", msg)
-    if re.search(r"\d{9,10}", clean):
-        notify_lina(f"📞 ליד חדש:\n{msg}")
+    logger.info(f"Received message: {msg}")
+
+    # זיהוי מספר טלפון ושליחה ללינה
+    phone_pattern = r'\b0\d{1,2}[-\s]?\d{7}\b|\b\d{9,10}\b'
+    if re.search(phone_pattern, msg):
+        notify_lina(f"🔥 <b>ליד חם! הושאר טלפון:</b>\n{msg}")
     else:
-        notify_lina(f"💬 הודעה:\n{msg}")
+        notify_lina(f"💬 <b>הודעה באתר:</b>\n{msg}")
 
-    prompt = f"""
-You are a real estate assistant for Lina.
-Reply ONLY in the same language as the user.
-Be short, friendly and professional.
-Your goal is to get the user's NAME and PHONE NUMBER.
-Do not explain anything.
-Do not give options.
-Just ask naturally.
+    # הכנת ה-prompt למוח של גוגל
+    prompt = f"""You are a real estate assistant for Lina.
+    INSTRUCTIONS:
+    1. Reply in the same language as the user (Hebrew/Russian/English).
+    2. Be short, polite, and professional.
+    3. YOUR GOAL: Get the user's Name and Phone Number.
+    4. Do NOT explain your logic. Do NOT say 'thought'. Just reply.
+    
+    User message: {msg}
+    """
 
-User message:
-{msg}
-""".strip()
-
+    # קריאה ישירה לגוגל
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL}:generateContent?key={API_KEY}"
-
+    
     payload = {
-        "contents": [
-            {
-                "parts": [{"text": prompt}]
-            }
-        ]
+        "contents": [{"parts": [{"text": prompt}]}]
     }
 
     try:
-        r = requests.post(url, json=payload, timeout=10)
-        r.raise_for_status()
-        data = r.json()
-
-        reply = (
-            data.get("candidates", [{}])[0]
-            .get("content", {})
-            .get("parts", [{}])[0]
-            .get("text", "")
-        )
-
-        if not reply:
-            raise ValueError("Empty reply")
-
-        return jsonify({"reply": reply})
+        response = requests.post(url, json=payload, timeout=10)
+        
+        if response.status_code == 200:
+            result = response.json()
+            reply = result["candidates"][0]["content"]["parts"][0]["text"].strip()
+            # ניקוי רעשים למקרה שגוגל מזייף
+            reply = reply.replace("thought", "").replace("Analysis", "")
+            return jsonify({"reply": reply}), 200
+        else:
+            logger.error(f"Google Error: {response.text}")
+            return jsonify({"reply": "אשמח לעזור! תשאירי לי שם וטלפון ואחזור אלייך בהקדם."}), 200
 
     except Exception as e:
-        logging.error(f"Gemini error: {e}")
-        return jsonify({
-            "reply": "אשמח לעזור 😊 אשאירי שם וטלפון ואחזור אליך בהקדם."
-        })
+        logger.error(f"Server Error: {e}")
+        return jsonify({"reply": "אשמח לעזור! תשאירי לי שם וטלפון ואחזור אלייך בהקדם."}), 200
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
