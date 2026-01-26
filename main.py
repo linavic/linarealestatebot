@@ -1,54 +1,66 @@
 import os
 import logging
 import threading
+import time
 import asyncio
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import google.generativeai as genai
 import requests
 from telegram import Update
+from telegram.error import Conflict
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
-# === 1. הגדרות ולוגים ===
+# === הגדרת לוגים (כדי שנראה מה קורה ב-Render) ===
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-CORS(app) # פותח גישה לאתר
+CORS(app)
 
-# מפתחות (נלקחים מ-Render)
+# === מפתחות ===
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GENAI_API_KEY = os.environ.get("GEMINI_API_KEY")
 ADMIN_ID = os.environ.get("ADMIN_ID")
 
-# הגדרת Gemini
+# === הגדרת Gemini ===
 model = None
 if GENAI_API_KEY:
-    genai.configure(api_key=GENAI_API_KEY)
-    model = genai.GenerativeModel(
-        model_name="gemini-1.5-flash",
-        system_instruction="אתה העוזר האישי של לינה סוחוביצקי (LINA Real Estate). תפקידך לענות באדיבות, בעברית, ולנסות לקבל שם וטלפון מהלקוח."
-    )
+    try:
+        genai.configure(api_key=GENAI_API_KEY)
+        model = genai.GenerativeModel(
+            model_name="gemini-1.5-flash",
+            system_instruction="אתה העוזר האישי של לינה סוחוביצקי (LINA Real Estate). תפקידך לענות באדיבות, בעברית, ולנסות לקבל שם וטלפון מהלקוח."
+        )
+        print("✅ Gemini AI Connected Successfully")
+    except Exception as e:
+        print(f"❌ Error connecting to Gemini: {e}")
+else:
+    print("⚠️ Warning: GEMINI_API_KEY is missing")
 
 # זיכרון לשיחות באתר
 web_chat_sessions = {}
 
-# === 2. פונקציות עזר ===
+# === פונקציות עזר ===
 def notify_lina(text):
-    """שולח הודעה ללינה בטלגרם כשיש פעילות באתר"""
+    """שולח הודעה ללינה בטלגרם"""
     if not TELEGRAM_TOKEN or not ADMIN_ID: return
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
         requests.post(url, json={"chat_id": ADMIN_ID, "text": f"🌐 *אתר:* {text}", "parse_mode": "Markdown"})
-    except: pass
+    except Exception as e:
+        print(f"Failed to notify Lina: {e}")
 
-# === 3. השרת של האתר (Flask) ===
+# === שרת האתר (Flask) ===
 @app.route('/')
 def index():
-    return "Lina Bot is Running Correctly!"
+    return "Lina Bot Server is Running and Healthy!"
 
 @app.route('/web-chat', methods=['POST'])
 def web_chat():
+    if not model:
+        return jsonify({'reply': "שגיאת שרת: המוח (AI) לא מחובר."})
+
     try:
         data = request.json
         user_msg = data.get('message')
@@ -59,60 +71,72 @@ def web_chat():
             web_chat_sessions[user_id] = model.start_chat(history=[])
             notify_lina(f"לקוח חדש באתר! ID: {user_id}")
 
-        # שליחת התראה ללינה על הודעת הלקוח
+        print(f"📩 Web Message from {user_id}: {user_msg}") # לוג לשרת
         notify_lina(f"👤 לקוח: {user_msg}")
 
-        # קבלת תשובה מ-Gemini
+        # שליחה ל-AI
         chat = web_chat_sessions[user_id]
         response = chat.send_message(user_msg)
-        bot_reply = response.text
+        print(f"🤖 AI Reply: {response.text}") # לוג לשרת
 
-        # זיהוי ליד (טלפון)
+        # בדיקת ליד
         if any(char.isdigit() for char in user_msg) and len(user_msg) > 6:
             notify_lina(f"🔥 **ליד חם! זוהה טלפון:**\n{user_msg}")
 
-        return jsonify({'reply': bot_reply})
+        return jsonify({'reply': response.text})
 
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"❌ Web Chat Error: {e}")
         return jsonify({'reply': "תקלה רגעית, אנא נסה שוב."})
 
 def run_flask():
-    """מריץ את השרת ברקע"""
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port, use_reloader=False)
 
-# === 4. הבוט של טלגרם ===
+# === בוט טלגרם ===
 async def telegram_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """עונה ללקוחות שפונים ישירות בטלגרם"""
+    if not model:
+        await update.message.reply_text("הבוט בשיפוצים (אין חיבור ל-AI).")
+        return
+
     try:
         user_text = update.message.text
-        # שימוש באותו מודל חכם גם לטלגרם
+        print(f"📩 Telegram Message: {user_text}") # לוג
         response = model.generate_content(user_text)
         await update.message.reply_text(response.text)
-    except:
-        await update.message.reply_text("סליחה, אני לא זמין כרגע.")
+    except Exception as e:
+        print(f"❌ Telegram AI Error: {e}")
+        await update.message.reply_text("סליחה, יש לי תקלה רגעית.")
 
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("היי! אני הבוט של לינה. איך אפשר לעזור?")
+def run_telegram_loop():
+    """מריץ את הטלגרם בלולאה חכמה שמונעת קריסות"""
+    if not TELEGRAM_TOKEN:
+        print("⚠️ No Telegram Token - Bot disabled.")
+        return
 
-# === 5. ההרצה הראשית (מונע התנגשויות) ===
+    asyncio.set_event_loop(asyncio.new_event_loop())
+    application = Application.builder().token(TELEGRAM_TOKEN).build()
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, telegram_reply))
+    application.add_handler(CommandHandler("start", lambda u,c: u.message.reply_text("היי! אני העוזר של לינה.")))
+
+    print("🚀 Starting Telegram Polling...")
+    
+    # מנגנון ה-Anti-Crash
+    while True:
+        try:
+            application.run_polling(allowed_updates=Update.ALL_TYPES, close_loop=False)
+        except Conflict:
+            print("⚠️ Conflict Error: Another bot is running. Waiting 5 seconds...")
+            time.sleep(5) # מחכה שהבוט השני ימות ומנסה שוב
+        except Exception as e:
+            print(f"❌ Critical Telegram Error: {e}. Restarting in 5s...")
+            time.sleep(5)
+
+# === הפעלה ===
 if __name__ == "__main__":
-    # א. הפעלת שרת האתר ב-Thread נפרד (לא חוסם)
-    flask_thread = threading.Thread(target=run_flask)
-    flask_thread.daemon = True
-    flask_thread.start()
-    print("✅ Website Server Started")
+    # 1. הרצת טלגרם ברקע
+    t = threading.Thread(target=run_telegram_loop, daemon=True)
+    t.start()
 
-    # ב. הפעלת בוט הטלגרם (תהליך ראשי)
-    if TELEGRAM_TOKEN:
-        print("✅ Starting Telegram Bot...")
-        application = Application.builder().token(TELEGRAM_TOKEN).build()
-        application.add_handler(CommandHandler("start", start_command))
-        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, telegram_reply))
-        
-        # הרצה שקטה
-        application.run_polling(allowed_updates=Update.ALL_TYPES)
-    else:
-        print("⚠️ No Telegram Token. Running only Web Server.")
-        flask_thread.join()
+    # 2. הרצת האתר
+    run_flask()
