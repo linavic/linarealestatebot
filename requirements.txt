@@ -3,4 +3,3 @@ flask-cors
 google-generativeai
 requests
 gunicorn
-python-telegram-bot
