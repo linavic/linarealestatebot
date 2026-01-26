@@ -19,12 +19,12 @@ API_KEY = get_key("GEMINI_API_KEY")
 TELEGRAM_TOKEN = get_key("TELEGRAM_TOKEN")
 ADMIN_ID = get_key("ADMIN_ID")
 
-# כתובת למודל Flash המהיר
+# משתמשים במודל FLASH שעבד לך מקודם
 GOOGLE_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={API_KEY}"
 
 chat_history = {}
 
-# === שליחת הודעה לטלגרם של לינה ===
+# === שליחה לטלגרם ===
 def notify_lina(text):
     if not TELEGRAM_TOKEN or not ADMIN_ID: return
     try:
@@ -32,23 +32,19 @@ def notify_lina(text):
                       json={"chat_id": ADMIN_ID, "text": text}, timeout=3)
     except: pass
 
+# === המוח של הבוט ===
 def ask_google(user_id, message):
     history = chat_history.get(user_id, [])
     history.append({"role": "user", "parts": [{"text": message}]})
     
-    # === המוח החדש: כל השפות + בקשת טלפון ===
+    # הוראה קשוחה לבוט: בלי מחשבות, בלי אופציות
     system_instruction = """
-    You are the AI Assistant of Lina Suhovitsky (LINA Real Estate).
-    
-    YOUR RULES:
-    1. **Language:** Detect the language of the user's message (Hebrew, Russian, French, English, etc.) and reply in the EXACT SAME language.
-    2. **Goal:** Your main goal is to get the user's NAME and PHONE NUMBER.
-    3. **Strategy:** - Answer the user's question briefly and politely.
-       - Immediately after answering, ask for their contact details to continue the service.
-       - Example (Hebrew): "אשמח לתת לך פרטים מלאים! מה שמך ומספר הטלפון שלך?"
-       - Example (Russian): "Я с радостью расскажу подробнее! Как вас зовут и какой у вас номер телефона?"
-       - Example (French): "Je serais ravi de vous donner plus de détails! Quel est votre nom et votre numéro de téléphone ?"
-    4. **Forbidden:** Do NOT output internal thoughts or "thought" tags. Only the final reply.
+    You are Lina Real Estate's assistant.
+    RULES:
+    1. Reply ONLY in the language the user speaks.
+    2. Be short, polite, and sales-oriented.
+    3. YOUR GOAL: Get the Name and Phone Number.
+    4. CRITICAL: NEVER output 'thought_', 'Option 1', or internal reasoning. Just the final reply.
     """
 
     payload = {
@@ -66,48 +62,49 @@ def ask_google(user_id, message):
             if 'candidates' in result and result['candidates']:
                 bot_text = result['candidates'][0]['content']['parts'][0]['text']
                 
-                # מחיקת "מחשבות" אם הבוט בטעות פלט אותן
-                if "thought" in bot_text: 
-                    # תשובה גנרית בטוחה במקרה של תקלה בטקסט
-                    return "אשמח לעזור! כדי שנוכל להתקדם, מה שמך ומספר הטלפון שלך?"
-
+                # === מספריים: חיתוך שטויות אם הן מופיעות ===
+                # אם הבוט מתחיל לחפור עם thought_ או Option, אנחנו מוחקים את זה ידנית
+                if "thought_" in bot_text or "**Option" in bot_text:
+                    # במקום השטויות, נחזיר תשובה בטוחה
+                    bot_text = "אשמח לעזור לך! כדי שנוכל להתקדם, מה שמך ומספר הטלפון שלך?"
+                
                 # שמירה בהיסטוריה
                 history.append({"role": "model", "parts": [{"text": bot_text}]})
                 chat_history[user_id] = history[-10:]
                 return bot_text
         
-        return "System update... Please leave your Name and Phone number."
+        # אם גוגל לא ענה טוב
+        return "אשמח לעזור, אנא השאר פרטים (שם וטלפון) ואחזור אליך."
 
     except Exception as e:
         print(f"Error: {e}")
-        return "Connection error. Please try again."
+        return "תקלה בחיבור. נסה שוב."
 
 @app.route('/')
 def home():
-    return "Lina Multi-Language Bot Active 🌍"
+    return "Lina Bot Fixed & Clean 🚀"
 
 @app.route('/web-chat', methods=['POST'])
 def web_chat():
     try:
-        if not API_KEY: return jsonify({'reply': "Error: Missing API Key"})
+        if not API_KEY: return jsonify({'reply': "Error: API Key Missing"})
 
         data = request.json
         msg = data.get('message', '')
         uid = data.get('user_id', 'guest')
 
-        # === זיהוי פרטי קשר ושליחה לטלגרם ===
-        
-        # 1. בדיקה אם יש מספר טלפון (רצף ספרות)
+        # === זיהוי ליד ושליחה לטלגרם ===
+        # מחפש רצף של 9-10 ספרות
         phone_match = re.search(r'\d{9,10}', msg.replace('-', '').replace(' ', ''))
         
         if phone_match:
-            # שלח ללינה התראה דחופה!
-            notify_lina(f"✅ **התקבלו פרטי קשר!**\nהלקוח כתב: {msg}")
+            # מצאנו טלפון! שולח לך הודעה דחופה
+            notify_lina(f"✅ **יש ליד חדש!**\nהלקוח כתב: {msg}")
         else:
-            # סתם עדכון על שיחה
-            threading.Thread(target=notify_lina, args=(f"💬 לקוח באתר: {msg}",)).start()
+            # סתם שיחה - מעדכן אותך ברקע
+            threading.Thread(target=notify_lina, args=(f"💬 {msg}",)).start()
 
-        # קבלת תשובה מהבוט
+        # קבלת תשובה
         reply = ask_google(uid, msg)
         return jsonify({'reply': reply})
 
