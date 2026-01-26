@@ -1,15 +1,13 @@
 import os
 import logging
 import threading
-import sys
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import google.generativeai as genai
 import requests
 
-# הגדרת לוגים חזקה יותר שתופיע מיד ב-Render
-logging.basicConfig(stream=sys.stdout, level=logging.INFO)
-logger = logging.getLogger(__name__)
+# לוגים ברורים
+logging.basicConfig(level=logging.INFO)
 
 app = Flask(__name__)
 CORS(app)
@@ -19,66 +17,64 @@ GENAI_API_KEY = os.environ.get("GEMINI_API_KEY")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 ADMIN_ID = os.environ.get("ADMIN_ID")
 
-# חיבור ל-Gemini
+# חיבור למוח (Gemini)
 model = None
 if GENAI_API_KEY:
     try:
         genai.configure(api_key=GENAI_API_KEY)
-        model = genai.GenerativeModel("gemini-1.5-flash")
-        print("✅ Gemini Configured")
+        model = genai.GenerativeModel("gemini-1.5-flash", 
+            system_instruction="אתה העוזר של לינה (LINA Real Estate). ענה בעברית קצרה, נחמדה ומכירתית. נסה להשיג טלפון."
+        )
+        print("✅ Gemini Connected")
     except Exception as e:
-        print(f"❌ Gemini Config Error: {e}")
-else:
-    print("⚠️ MISSING GEMINI_API_KEY")
+        print(f"❌ Gemini Error: {e}")
 
 chat_sessions = {}
 
-# פונקציית שליחה לטלגרם (עם הדפסת שגיאות)
-def send_tele(text):
+# --- פונקציה פשוטה לשליחת הודעה (בלי בוט) ---
+def notify_lina(text):
     if not TELEGRAM_TOKEN or not ADMIN_ID: return
     try:
+        # שליחה פשוטה כמו כניסה לאתר אינטרנט
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
         requests.post(url, json={"chat_id": ADMIN_ID, "text": text}, timeout=5)
-    except Exception as e:
-        print(f"❌ Telegram Error: {e}")
+    except:
+        pass # אם לא הצליח לשלוח ללינה, לא נורא - העיקר שהאתר לא יקרוס
 
 @app.route('/')
 def home():
-    return "Debug Mode Active"
+    return "Lina Website Bot is Active! 🚀"
 
 @app.route('/web-chat', methods=['POST'])
 def web_chat():
-    try:
-        # 1. בדיקת מפתח
-        if not GENAI_API_KEY:
-            return jsonify({'reply': "שגיאה קריטית: חסר המפתח GEMINI_API_KEY בהגדרות השרת."})
-        
-        # 2. בדיקת חיבור למודל
-        if not model:
-            return jsonify({'reply': "שגיאה: המודל לא נטען. המפתח כנראה שגוי."})
+    if not model:
+        return jsonify({'reply': "שגיאת שרת: חסר מפתח AI."})
 
+    try:
         data = request.json
         user_msg = data.get('message')
         user_id = data.get('user_id', 'guest')
+        
+        print(f"📩 הודעה: {user_msg}")
 
-        # 3. ניסיון דיווח ללינה
-        threading.Thread(target=send_tele, args=(f"לקוח: {user_msg}",)).start()
+        # 1. שליחת התראה ללינה (ברקע)
+        threading.Thread(target=notify_lina, args=(f"👤 *לקוח באתר:* {user_msg}",)).start()
 
-        # 4. התחלת שיחה
+        # 2. פתיחת שיחה
         if user_id not in chat_sessions:
             chat_sessions[user_id] = model.start_chat(history=[])
-        
-        # 5. שליחה ל-Google (כאן לרוב זה נופל)
+            # התראה על לקוח חדש
+            threading.Thread(target=notify_lina, args=(f"🚀 **לקוח חדש נכנס!**",)).start()
+
+        # 3. תשובה מה-AI
         chat = chat_sessions[user_id]
         response = chat.send_message(user_msg)
         
         return jsonify({'reply': response.text})
 
     except Exception as e:
-        # === כאן השינוי: הבוט יגיד לך מה השגיאה ===
-        error_msg = str(e)
-        print(f"❌ CRITICAL ERROR: {error_msg}")
-        return jsonify({'reply': f"🔴 שגיאה טכנית (צלמי מסך ושלחי לבונה האתר):\n{error_msg}"})
+        print(f"❌ Error: {e}")
+        return jsonify({'reply': "סליחה, יש לי תקלה רגעית. נסה שוב."})
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
